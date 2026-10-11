@@ -12,6 +12,24 @@
 **/logs/
 **/*debug*.jsonl
 
+# Local-only project and development documentation
+/PROJECT_HANDOFF.md
+/CONTRIBUTING.md
+/CUHK-VALIDATION.md
+/README-CUHK.md
+/PRIVACY.md
+/SECURITY.md
+/.github/pull_request_template.md
+/docs/
+.codex-remote-attachments/
+# Local investigation probes; formal scripts remain reviewable
+scripts/probe-bbcswebdav-referer.cjs
+scripts/probe-min.cjs
+scripts/probe_bbcswebdav_referer.py
+scripts/probe_referer_anonymous.py
+scripts/probe_referer_browser.py
+scripts/probe_referer_live.py
+
 # Runtime state, caches, downloads, and build output
 **/.runtime/
 **/runtime/

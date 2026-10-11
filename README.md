@@ -2,20 +2,20 @@
 
 > **Test environment (2026-10-10):** Windows build reported by `cmd /c ver` as `10.0.26300.9550`, AMD64; bundled Node `24.19.0`, npm `11.19.1`, bundled Python `3.12.14`, Electron `44.4.3`, and Playwright Chromium `153.0.8010.12`. The WMI/CIM edition caption was unavailable in the restricted test host, so no edition name is inferred here.
 >
-> **Current status:** the JSON API rebuild is being integrated on top of the M0 contract. M0 is committed; the latest M1–M5 `npm.cmd run build` completed with exit 0. This round does not run tests, typecheck, the application, a browser probe or a real school login. Earlier Python/sidecar, Classic TypeScript, completion, typecheck and Electron harness results are historical and do not verify the rebuilt route. Current runtime and user-test status: `USER TEST PENDING / UNTESTED`. Real school authentication, real course comparison, and a Windows installer remain BLOCKED. See [delivery status](docs/DELIVERY.md) and the [M5 delivery note](docs/CLASSIC_API_M5_DELIVERY.md).
+> **Current status (2026-10-11):** the typed JSON API rebuild is implemented under `src/classic/`, and the latest `npm.cmd run build` completed with exit 0. The user has reported that partial real Blackboard data is visible; that is user-reported and not an agent-run runtime result. The announcement-image WebDAV-prefix and bounded empty-calendar-page fixes remain pending user validation. This turn did not run tests, typecheck, the application, a browser probe or school HTTP. Session startup remains manual in a visible official Blackboard page; no complete course comparison or Windows installer readiness is claimed. Runtime validation remains user-owned.
 
 [中文说明](README.zh-CN.md)
 
-This repository is a local, read-only development preview for CUHK Shenzhen's Blackboard Classic portal. The rebuilt CUHK(SZ) path is a typed, fixed-origin JSON API reader under `src/classic/`, with an Electron-owned session and main-process resource boundary. The inherited Dashboard source from [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) and the isolated Python [bb-mcp](https://github.com/changshenhan/bb-mcp) sidecar remain in the tree for historical/public MCP compatibility; the new Classic route does not silently fall back to them. The current upstream source heads, import paths, and license records are in [M0 baseline](docs/M0-baseline.md).
+This repository is a local, read-only development preview for CUHK Shenzhen's Blackboard Classic portal. The rebuilt CUHK(SZ) path is a typed, fixed-origin JSON API reader under `src/classic/`, with an Electron-owned session and main-process resource boundary. The inherited Dashboard source from [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) and the isolated Python [bb-mcp](https://github.com/changshenhan/bb-mcp) sidecar remain in the tree for historical/public MCP compatibility; the new Classic route does not silently fall back to them. License files remain in the repository.
 
 The Dashboard shows courses, announcements, assignments and course-file links. The connector does not submit work, upload files, or download courseware. Login and MFA happen only in a visible official Blackboard page controlled by the local user. This project is independent of CUHK, Blackboard, Anthology and the upstream projects.
 
 ## What is verified
 
-- M0 schemas and synthetic API fixtures are source-level artifacts. The rebuilt reader keeps bounded pagination, account/generation checks, typed submission evidence, explicit calendar association, protected cache scope and visible partial coverage; these rules are awaiting the final build and user runtime check.
+- M0 schemas and synthetic API fixtures are source-level artifacts. The rebuilt reader keeps bounded pagination, account/generation checks, typed submission evidence, explicit calendar association, protected cache scope and visible partial coverage; the latest recorded build passed, and user runtime validation remains pending.
 - Earlier fixture, sidecar, Electron and typecheck results are historical records. The latest build exited 0; no current runtime result is claimed.
 
-The offline fixture and login harness evidence belong to the former sidecar/provider route. The rebuilt path uses the manually initiated Electron session, a single bounded JSON snapshot budget, fixed-origin GET/HEAD transport, protected account-scoped cache and opaque main-process resources. This round did not run those paths; runtime and user-test status remains `USER TEST PENDING / UNTESTED`. A visible login window or an `AUTH_REQUIRED` result does not authenticate a school account. The real school and installer boundaries remain in [the delivery status](docs/DELIVERY.md).
+The offline fixture and login harness evidence belong to the former sidecar/provider route. The rebuilt path uses the manually initiated Electron session, a single bounded JSON snapshot budget, fixed-origin GET/HEAD transport, protected account-scoped cache and opaque main-process resources. This round did not run those paths; runtime and user-test status remains `USER TEST PENDING / UNTESTED`. A visible login window or an `AUTH_REQUIRED` result does not authenticate a school account. Complete school comparison and installer acceptance remain pending.
 
 ## Windows development setup
 
@@ -71,7 +71,7 @@ node scripts/verify-classic-electron.mjs
 npm.cmd test
 ```
 
-These commands are retained for reproducibility and user verification. In this round, `npm.cmd run build` exited 0; tests, typecheck, the application, browser probes and the full suite were not run. Runtime and school-account acceptance remain USER TEST PENDING; the build record is in [M5 delivery](docs/CLASSIC_API_M5_DELIVERY.md).
+These commands are retained for reproducibility and user verification. The latest recorded `npm.cmd run build` exited 0; tests, typecheck, the application, browser probes and the full suite were not run. Runtime and school-account acceptance remain USER TEST PENDING.
 
 The previous full-suite record is kept as history rather than presented as a current run: 169 tests produced 158 PASS, 3 known baseline FAIL and 8 SKIP before the current runtime/session fixes. The current runtime has not been tested. Redirecting only the current process's `TEMP` and `TMP` into a writable workspace removes unrelated temporary-file EPERM errors for future targeted runs.
 
@@ -96,7 +96,5 @@ Preserve both upstream license files when copying or packaging the source:
 - [Dashboard MIT license](LICENSE)
 - [bb-mcp license](sidecar/bb-mcp/LICENSE)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
-- [Privacy notice](PRIVACY.md)
-- [Delivery report](docs/DELIVERY.md)
 
 The source is provided for local development and review. No signed Windows installer is delivered by this repository at the current status.

@@ -2,11 +2,11 @@
 
 > **测试环境（2026-10-10）：** `cmd /c ver` 报告 Windows build `10.0.26300.9550`、AMD64；使用 bundled Node `24.19.0`、npm `11.19.1`、bundled Python `3.12.14`、Electron `44.4.3` 和 Playwright Chromium `153.0.8010.12`。受限测试主机无法访问 WMI/CIM edition caption，因此不从注册表残留值推断系统版本名称。
 >
-> **当前状态：** 后端 JSON API 重建正在 M0 契约之上集成。M0 已提交；最近一次 M1–M5 `npm.cmd run build` exit 0。本轮不运行测试、typecheck、应用、浏览器探针或真实学校登录；早期 Python/sidecar、Classic TypeScript、完成标记、typecheck 和 Electron harness 结果都是历史记录，不能证明重建链路。当前 runtime 和人工测试状态：`USER TEST PENDING / UNTESTED`。真实学校身份认证、真实课程对照和 Windows 安装包仍是 BLOCKED。见[交付状态](docs/DELIVERY.md)和 [M5 交付说明](docs/CLASSIC_API_M5_DELIVERY.md)。
+> **当前状态（2026-10-11）：** 类型化 JSON API 重建已落在 `src/classic/`，最近一次 `npm.cmd run build` exit 0。用户反馈已能看到部分真实 Blackboard 数据；这是用户反馈，不是 agent 本轮运行时实测。公告图片 WebDAV 前缀修复和有界空日历页修复仍待用户验收。本轮没有运行测试、typecheck、应用、浏览器探针或学校 HTTP。会话启动仍由用户在可见的官方 Blackboard 页面手动完成；不宣称完整课程对照或 Windows 安装包已就绪。运行验收仍由用户在本机完成。
 
 [English README](README.md)
 
-这是一个面向香港中文大学（深圳）Blackboard Classic 的本地只读开发预览。重建后的 CUHK(SZ) 路径是 `src/classic/` 下的类型化固定学校 origin JSON API reader，由 Electron 主进程管理会话和资源边界。继承的 [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) 源码和 [bb-mcp](https://github.com/changshenhan/bb-mcp) Python sidecar 仍保留作历史/公共 MCP 兼容源码；新 Classic 路径不会静默回退到它们。上游 SHA、导入路径和许可证记录见 [M0 基线报告](docs/M0-baseline.md)。
+这是一个面向香港中文大学（深圳）Blackboard Classic 的本地只读开发预览。重建后的 CUHK(SZ) 路径是 `src/classic/` 下的类型化固定学校 origin JSON API reader，由 Electron 主进程管理会话和资源边界。继承的 [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) 源码和 [bb-mcp](https://github.com/changshenhan/bb-mcp) Python sidecar 仍保留作历史/公共 MCP 兼容源码；新 Classic 路径不会静默回退到它们。许可证文件仍保留在仓库中。
 
 Dashboard 展示课程、公告、作业和课程资料链接。连接器不提交作业、不上传文件、不下载课件。登录和 MFA 只在用户自己操作的、可见的官方 Blackboard 页面中完成。本项目与 CUHK、Blackboard、Anthology 及两个上游项目均无官方合作关系。
 
@@ -15,7 +15,7 @@ Dashboard 展示课程、公告、作业和课程资料链接。连接器不提�
 - M0 schema 和 synthetic API fixture 已作为源码交付。重建 reader 保留有界分页、账号/代次核对、类型化提交证据、明确日历关联、受保护账号缓存和可见的 partial coverage；当前 build 已通过，仍待用户本机运行。
 - 早期 fixture、sidecar、Electron 和 typecheck 结果均为历史记录。最近一次 build exit 0；不宣称当前 runtime 已通过。
 
-离线 fixture 和登录 harness 属于旧 sidecar/provider 路径的历史记录。重建路径使用用户手动发起的 Electron session、单次有界 JSON snapshot 预算、固定学校 origin 的 GET/HEAD transport、受保护账号缓存和主进程 opaque resource。本轮没有运行这些路径，状态仍为 `USER TEST PENDING / UNTESTED`。看到登录窗口或得到 `AUTH_REQUIRED` 都不能当作学校身份认证成功。真人学校验收和安装包边界见 [交付状态](docs/DELIVERY.md)。
+离线 fixture 和登录 harness 属于旧 sidecar/provider 路径的历史记录。重建路径使用用户手动发起的 Electron session、单次有界 JSON snapshot 预算、固定学校 origin 的 GET/HEAD transport、受保护账号缓存和主进程 opaque resource。本轮没有运行这些路径，状态仍为 `USER TEST PENDING / UNTESTED`。看到登录窗口或得到 `AUTH_REQUIRED` 都不能当作学校身份认证成功。真人学校验收和安装包边界仍未完成。
 
 ## Windows 开发安装
 
@@ -71,7 +71,7 @@ node scripts/verify-classic-electron.mjs
 npm.cmd test
 ```
 
-以上命令保留用于复现和用户验证。本轮没有运行测试、typecheck、应用、浏览器探针和全套回归；本轮 `npm.cmd run build` 已实际 exit 0，真实运行仍待用户完成，详见 [M5 交付说明](docs/CLASSIC_API_M5_DELIVERY.md)。
+以上命令保留用于复现和用户验证。最近一次记录的 `npm.cmd run build` 已 exit 0；本轮没有新增 build，也没有运行测试、typecheck、应用、浏览器探针和全套回归。真实运行仍待用户完成。
 
 上一阶段全套测试记录会作为历史保留：当前 runtime/session 修复前共 169 项，158 PASS、3 个已知基线 FAIL、8 SKIP；当前 runtime 尚未测试。只把当前进程的 `TEMP`、`TMP` 指向可写工作区可以消除未来定向运行中的无关临时文件 EPERM。
 
@@ -96,7 +96,5 @@ npm.cmd test
 - [Dashboard MIT 许可证](LICENSE)
 - [bb-mcp 许可证](sidecar/bb-mcp/LICENSE)
 - [第三方组件声明](THIRD_PARTY_NOTICES.md)
-- [隐私说明](PRIVACY.md)
-- [交付报告](docs/DELIVERY.md)
 
 当前仓库提供本地开发源码，尚未交付签名 Windows 安装包。
