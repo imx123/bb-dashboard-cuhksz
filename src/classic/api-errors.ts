@@ -75,6 +75,23 @@ export function isClassicApiError(value: unknown): value is ClassicApiError {
   return value instanceof ClassicApiError;
 }
 
+function isPublicClassicApiError(value: unknown): value is PublicClassicApiError {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(candidate, 'code') ||
+      !Object.prototype.hasOwnProperty.call(candidate, 'scope') ||
+      !Object.prototype.hasOwnProperty.call(candidate, 'retryable')) return false;
+  if (!ClassicApiErrorCodeSchema.safeParse(candidate.code).success) return false;
+  if (typeof candidate.scope !== 'string' || candidate.scope.length === 0 || candidate.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(candidate.scope)) return false;
+  if (typeof candidate.retryable !== 'boolean') return false;
+  if (candidate.status !== undefined) {
+    const status = candidate.status;
+    if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return false;
+  }
+  if (candidate.stale !== undefined && typeof candidate.stale !== 'boolean') return false;
+  return true;
+}
+
 export function isAuthenticationError(value: unknown): boolean {
   return value instanceof ClassicApiError && (value.code === 'AUTH_REQUIRED' || value.code === 'SESSION_EXPIRED');
 }
@@ -95,5 +112,14 @@ export function apiErrorFromStatus(status: number, scope: string, url: URL): Cla
 
 export function publicApiError(value: unknown): PublicClassicApiError {
   if (value instanceof ClassicApiError) return value.toPublic();
+  if (isPublicClassicApiError(value)) {
+    return {
+      code: value.code,
+      scope: value.scope,
+      ...(value.status === undefined ? {} : { status: value.status }),
+      retryable: value.retryable,
+      ...(value.stale === undefined ? {} : { stale: value.stale }),
+    };
+  }
   return { code: 'RESOURCE_FAILED', scope: 'unknown', retryable: true };
 }
