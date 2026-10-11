@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { debugLog } from '../debug-log.js';
 import { ClassicError, classifyConnectorError, errorCode } from './errors.js';
 import { classicUrl, courseUrl } from './url-policy.js';
 import type { Announcement, Assignment, AuthResult, Course, CourseFile, Evidence, Snapshot, SnapshotError } from './schema.js';
@@ -112,10 +113,16 @@ export function parseCourses(result: ClassicResult): Course[] {
   if (items) {
     const parsed = items.map(courseFrom).filter((value): value is Course => !!value);
     if (parsed.length !== items.length) throw new ClassicError('COURSE_PARSE_CHANGED', '课程列表格式发生变化，未将不完整结果当成空列表。');
-    return dedupCourses(parsed);
+    const output = dedupCourses(parsed);
+    debugLog.event('classic.parse.courses', { source: 'structured', courseCount: output.length });
+    return output;
   }
   const parsed = rows(textContent(result)).map(row => courseFrom(row)).filter((value): value is Course => !!value);
-  if (parsed.length) return dedupCourses(parsed);
+  if (parsed.length) {
+    const output = dedupCourses(parsed);
+    debugLog.event('classic.parse.courses', { source: 'table', courseCount: output.length });
+    return output;
+  }
   const text = textContent(result);
   if (/^\s*(?:0\s+courses|no courses(?: found)?[.!]?)\s*$/i.test(text)) return [];
   throw new ClassicError('COURSE_PARSE_CHANGED', '课程列表格式发生变化，未将解析失败当成无课程。');
@@ -154,7 +161,11 @@ export function parseAnnouncements(result: ClassicResult, input: CourseContext):
   if (!result || result.isError) throw toolError(result, `announcements:${course.id}`);
   const payload = structured(result);
   const items = arrayPayload(payload, ['announcements', 'items', 'results']);
-  if (items) return dedupAnnouncements(items.map((item, index) => announcementFrom(item, course, index)).filter((value): value is Announcement => !!value));
+  if (items) {
+    const output = dedupAnnouncements(items.map((item, index) => announcementFrom(item, course, index)).filter((value): value is Announcement => !!value));
+    debugLog.event('classic.parse.announcements', { source: 'structured', courseId: course.id, announcementCount: output.length });
+    return output;
+  }
   const text = textContent(result);
   if (/no announcements found|没有公告/i.test(text)) return [];
   const blocks = text.split(/\n\s*(?:──────|-{3,})\s*\n/).map(value => value.trim()).filter(Boolean);
@@ -175,7 +186,9 @@ export function parseAnnouncements(result: ClassicResult, input: CourseContext):
       unread: null,
     } satisfies Announcement;
   });
-  return dedupAnnouncements(parsed);
+  const output = dedupAnnouncements(parsed);
+  debugLog.event('classic.parse.announcements', { source: 'text', courseId: course.id, announcementCount: output.length });
+  return output;
 }
 
 function dedupAnnouncements(items: Announcement[]): Announcement[] {
@@ -222,7 +235,11 @@ export function parseAssignments(result: ClassicResult, input: CourseContext): A
   if (!result || result.isError) throw toolError(result, `assignments:${course.id}`);
   const payload = structured(result);
   const items = arrayPayload(payload, ['assignments', 'items', 'results']);
-  if (items) return dedupAssignments(items.map((item, index) => assignmentFrom(item, course, index)).filter((value): value is Assignment => !!value));
+  if (items) {
+    const output = dedupAssignments(items.map((item, index) => assignmentFrom(item, course, index)).filter((value): value is Assignment => !!value));
+    debugLog.event('classic.parse.assignments', { source: 'structured', courseId: course.id, assignmentCount: output.length });
+    return output;
+  }
   const text = textContent(result);
   if (/no assignment(?: items| entries)? found|没有作业/i.test(text)) return [];
   const matches = [...text.matchAll(/^-\s*\[([^\]]+)\]\s*(.+)$/gim)];
@@ -232,7 +249,9 @@ export function parseAssignments(result: ClassicResult, input: CourseContext): A
     return assignmentFrom({ title: matches.length ? match[2] : match[1], due: dateValue, dueEvidence: dateValue ? 'page-text' : 'unknown' }, course, index);
   }).filter((value): value is Assignment => !!value);
   if (!parsed.length) throw new ClassicError('RESULT_PARSE_FAILED', '作业结果没有可识别结构。');
-  return dedupAssignments(parsed);
+  const output = dedupAssignments(parsed);
+  debugLog.event('classic.parse.assignments', { source: 'text', courseId: course.id, assignmentCount: output.length });
+  return output;
 }
 
 function dedupAssignments(items: Assignment[]): Assignment[] {
@@ -260,12 +279,18 @@ export function parseFiles(result: ClassicResult, input: CourseContext): CourseF
   if (!result || result.isError) throw toolError(result, `files:${course.id}`);
   const payload = structured(result);
   const items = arrayPayload(payload, ['files', 'items', 'results']);
-  if (items) return dedupFiles(items.map((item, index) => fileFrom(item, course, index)).filter((value): value is CourseFile => !!value));
+  if (items) {
+    const output = dedupFiles(items.map((item, index) => fileFrom(item, course, index)).filter((value): value is CourseFile => !!value));
+    debugLog.event('classic.parse.files', { source: 'structured', courseId: course.id, fileCount: output.length });
+    return output;
+  }
   const text = textContent(result);
   if (/no files?(?: found| links found)?|没有文件|没有课件/i.test(text)) return [];
   const parsed = [...text.matchAll(/^-\s*\[([^\]]+)\]\s*(.+)$/gim)].map((match, index) => fileFrom({ name: match[2], date: match[1] }, course, index)).filter((value): value is CourseFile => !!value);
   if (!parsed.length) throw new ClassicError('RESULT_PARSE_FAILED', '资料结果没有可识别结构。');
-  return dedupFiles(parsed);
+  const output = dedupFiles(parsed);
+  debugLog.event('classic.parse.files', { source: 'text', courseId: course.id, fileCount: output.length });
+  return output;
 }
 
 /** Adapt the connector's one-call structured Snapshot.  This path is the
@@ -303,7 +328,16 @@ export function parseSnapshotResult(result: ClassicResult): Snapshot {
   }
   const state = payload.state;
   const fetchedAt = payload.fetchedAt;
-  return makeSnapshot({ state, fetchedAt, courses: courseValues, announcements, assignments, files, errors });
+  const output = makeSnapshot({ state, fetchedAt, courses: courseValues, announcements, assignments, files, errors });
+  debugLog.event('classic.parse.snapshot', {
+    state,
+    courseCount: output.courses.length,
+    announcementCount: output.announcements.length,
+    assignmentCount: output.assignments.length,
+    fileCount: output.files.length,
+    errorCount: output.errors.length,
+  });
+  return output;
 }
 
 export interface ClassicStatus {

@@ -6,6 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { stateHome } from '../config.js';
+import { createTraceId, currentTraceId, debugLog, debugLogDirectory, runWithTrace } from '../debug-log.js';
 import { ClassicError, classifyConnectorError } from './errors.js';
 import { ClassicToolNameSchema, type ClassicToolName } from './schema.js';
 
@@ -97,6 +98,28 @@ function trustedPath(value: string, root: string): string {
   return absolute;
 }
 
+const SIDECAR_ERROR_TYPES = ['ModuleNotFoundError', 'IndentationError', 'SyntaxError', 'ImportError', 'NameError', 'TypeError', 'AttributeError', 'KeyError', 'ValueError', 'RuntimeError', 'TimeoutError', 'OSError'] as const;
+const SIDECAR_SOURCE_FILES = new Set(['classic_connector.py', 'connector_runtime.py', 'debug_log.py', 'read_diagnostics.py', 'server.py']);
+
+function sidecarStderrSummary(buffer: string): Record<string, unknown> {
+  const fields: Record<string, unknown> = { hasError: /error|exception|traceback|BB_DEBUG_LOG_WRITE_FAILED/i.test(buffer) };
+  if (buffer.includes('BB_DEBUG_LOG_WRITE_FAILED')) fields.errorCode = 'BB_DEBUG_LOG_WRITE_FAILED';
+  const errorType = SIDECAR_ERROR_TYPES.find(name => new RegExp(`\\b${name}\\b`).test(buffer));
+  if (errorType) fields.errorType = errorType;
+  const location = buffer.match(/File ["']([^"']+)["'], line (\d+)/i) ?? buffer.match(/(?:^|[\s(])([^()\s\/\\]+\.py):(\d+)(?::(\d+))?/i);
+  if (!location) return fields;
+  const filePath = location[1];
+  if (typeof filePath !== 'string') return fields;
+  const sourceFile = filePath.replace(/^.*[\\/]/, '');
+  if (!SIDECAR_SOURCE_FILES.has(sourceFile)) return fields;
+  fields.sourceFile = sourceFile;
+  const line = Number(location[2]);
+  if (Number.isInteger(line)) fields.line = line;
+  const column = Number(location[3]);
+  if (Number.isInteger(column)) fields.column = column;
+  return fields;
+}
+
 export function resolveClassicRuntime(options: ClassicMcpClientOptions = {}): ResolvedRuntime {
   const roots = candidateSidecarRoots();
   const root = resolve(options.sidecarRoot ?? roots.find(value => existsSync(join(value, 'server.py')) && candidatePythonPaths(value).some(existsSync)) ?? roots[0] ?? '');
@@ -115,6 +138,8 @@ export function resolveClassicRuntime(options: ClassicMcpClientOptions = {}): Re
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined && !/^BB_(USERNAME|PASSWORD|COOKIE|TOKEN|CREDENTIAL)/i.test(key)) env[key] = value;
   env.BB_BASE_URL = 'https://bb.cuhk.edu.cn';
+  env.BB_DEBUG_LOG_DIR = debugLogDirectory();
+  env.BB_DEBUG_LOG = '1';
   const maxCourses = Math.min(50, Math.max(1, Math.floor(options.maxCourses ?? 15)));
   env.BB_MAX_COURSES = String(maxCourses);
   // Keep the Sidecar's bounded work budget below the Node RPC budget.  This
@@ -135,9 +160,22 @@ export function resolveClassicRuntime(options: ClassicMcpClientOptions = {}): Re
 }
 
 async function defaultConnection(runtime: ResolvedRuntime, timeoutMs: number): Promise<Connection> {
+  const started = Date.now();
+  debugLog.event('mcp.connection.start', { timeoutMs });
   const transport = new StdioClientTransport({ command: runtime.command, args: runtime.args, cwd: runtime.cwd, env: runtime.env, stderr: 'pipe' });
   const client = new Client({ name: 'cuhksz-classic-dashboard', version: '0.1.0' });
-  transport.stderr?.on('data', () => { /* never expose Python/HTML diagnostics to the renderer */ });
+  let stderrBuffer = '';
+  let lastStderrError = '';
+  transport.stderr?.on('data', data => {
+    const line = String(data);
+    stderrBuffer = `${stderrBuffer}${line}`.slice(-16_000);
+    const summary = sidecarStderrSummary(stderrBuffer);
+    const errorSignature = [summary.errorCode, summary.errorType, summary.sourceFile, summary.line, summary.column].join('|');
+    if ((summary.errorType || summary.errorCode) && errorSignature === lastStderrError) return;
+    if (summary.errorType || summary.errorCode) lastStderrError = errorSignature;
+    if (summary.errorCode === 'BB_DEBUG_LOG_WRITE_FAILED') debugLog.markExternalWriteFailure('BB_DEBUG_LOG_WRITE_FAILED');
+    debugLog.event('sidecar.stderr', { byteLength: Buffer.byteLength(line, 'utf8'), ...summary });
+  });
   try {
     await client.connect(transport, { timeout: timeoutMs });
     const { tools } = await client.listTools();
@@ -147,6 +185,7 @@ async function defaultConnection(runtime: ResolvedRuntime, timeoutMs: number): P
     const previousOnError = transport.onerror;
     transport.onclose = () => { transportAlive = false; previousOnClose?.(); };
     transport.onerror = error => { transportAlive = false; previousOnError?.(error); };
+    debugLog.event('mcp.connection.ready', { elapsedMs: Date.now() - started, toolCount: reviewed.size });
     return {
       client,
       transport,
@@ -156,8 +195,21 @@ async function defaultConnection(runtime: ResolvedRuntime, timeoutMs: number): P
     };
   } catch (error) {
     await client.close().catch(() => {}); await transport.close().catch(() => {});
+    debugLog.error('mcp.connection.error', error, { elapsedMs: Date.now() - started });
     throw new ClassicError('CONNECTOR_START_FAILED', 'Classic 连接器未能启动，请检查本机 Sidecar 环境。', { cause: error });
   }
+}
+
+function resultSummary(result: CallToolResult): Record<string, unknown> {
+  const payload = result?.structuredContent;
+  const counts: Record<string, number> = {};
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    for (const key of ['courses', 'announcements', 'assignments', 'files', 'errors']) {
+      const value = (payload as Record<string, unknown>)[key];
+      if (Array.isArray(value)) counts[`${key}Count`] = value.length;
+    }
+  }
+  return { isError: Boolean(result?.isError), contentBlocks: result?.content?.length ?? 0, ...counts };
 }
 
 function validateArguments(tool: ClassicToolName, args: ToolArguments): void {
@@ -219,7 +271,10 @@ export class ClassicMcpClient {
 
   private async getConnection(): Promise<Connection> {
     if (this.closed) throw new ClassicError('CONNECTOR_DISCONNECTED', 'Classic 连接器已关闭，请重新加载。');
-    if (this.connection) return this.connection;
+    if (this.connection) {
+      debugLog.event('mcp.connection.reuse');
+      return this.connection;
+    }
     if (!this.connecting) {
       this.connecting = (async () => {
         // Test connection factories do not spawn the trusted Sidecar.  Give
@@ -234,8 +289,13 @@ export class ClassicMcpClient {
           throw new ClassicError('CONNECTOR_DISCONNECTED', 'Classic 连接器已关闭，请重新加载。');
         }
         this.connection = connection;
+        debugLog.event('mcp.connection.attached');
         return connection;
-      })().catch(error => { throw classifyConnectorError(error); }).finally(() => { this.connecting = undefined; });
+      })().catch(error => {
+        const classified = classifyConnectorError(error);
+        debugLog.error('mcp.connection.failed', classified);
+        throw classified;
+      }).finally(() => { this.connecting = undefined; });
     }
     return this.connecting;
   }
@@ -246,30 +306,38 @@ export class ClassicMcpClient {
   }
 
   async call(toolValue: string, args: ToolArguments = {}): Promise<CallToolResult> {
+    if (!currentTraceId()) return runWithTrace(createTraceId(), () => this.call(toolValue, args));
     const parsed = ClassicToolNameSchema.safeParse(toolValue);
     if (!parsed.success || !allowedTools.has(toolValue)) throw new ClassicError('TOOL_NOT_ALLOWED', '该 Blackboard 工具不在应用只读白名单内。', { recoverable: false });
     const tool = parsed.data;
     validateArguments(tool, args);
+    const traceId = currentTraceId()!;
+    const remoteArgs = { ...args, trace_id: traceId };
     let last: unknown;
     for (let attempt = 0; attempt <= this.options.retryCount; attempt++) {
       let activeConnection: Connection | undefined;
+      const started = Date.now();
+      debugLog.event('mcp.tool.start', { tool, attempt: attempt + 1, retryCount: this.options.retryCount });
       try {
         const connection = await this.getConnection();
         activeConnection = connection;
         if (!connection.tools.has(tool)) throw new ClassicError('TOOL_UNAVAILABLE', 'Classic 连接器版本未提供该只读工具。');
         const timeoutMs = tool === 'classic_snapshot' ? this.options.snapshotCallTimeoutMs : this.options.callTimeoutMs;
-        const call = connection.client.callTool({ name: tool, arguments: args }, undefined, { timeout: timeoutMs }) as Promise<CallToolResult>;
+        const call = connection.client.callTool({ name: tool, arguments: remoteArgs }, undefined, { timeout: timeoutMs }) as Promise<CallToolResult>;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          return await Promise.race([
+          const result = await Promise.race([
             call,
             new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new ClassicError('TIMEOUT', 'Blackboard 读取超时，请保持登录窗口打开后重试。')), timeoutMs); }),
           ]);
+          debugLog.event('mcp.tool.done', { tool, attempt: attempt + 1, elapsedMs: Date.now() - started, ...resultSummary(result) });
+          return result;
         } finally {
           if (timer !== undefined) clearTimeout(timer);
         }
       } catch (error) {
         const classified = classifyConnectorError(error);
+        debugLog.error('mcp.tool.error', classified, { tool, attempt: attempt + 1, elapsedMs: Date.now() - started });
         last = classified;
         // A timeout or tool failure can happen while the Python worker still
         // owns the user's persistent Playwright context.  Resetting the MCP
@@ -300,7 +368,9 @@ export class ClassicMcpClient {
   }
 
   async close(): Promise<void> {
+    debugLog.event('mcp.connection.close.start');
     this.closed = true;
     await this.resetConnection();
+    debugLog.event('mcp.connection.close.done');
   }
 }

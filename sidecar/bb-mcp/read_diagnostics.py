@@ -1,4 +1,4 @@
-"""Opt-in, bounded read diagnostics; never log URLs, headers or page text."""
+"""Opt-in active read comparisons; passive event logging lives in debug_log."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,8 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+import debug_log
 
 _attached: set[int] = set()
 _probed: set[tuple[int, str]] = set()
@@ -33,6 +35,13 @@ def enabled() -> bool:
 
 def emit(kind: str, **counts: object) -> None:
     global _records
+    # The new sidecar logger is passive and enabled by default.  Keep this
+    # module's old JSON/body comparison opt-in, while allowing its bounded
+    # parser counters to be correlated with the normal operation trace.
+    try:
+        debug_log.emit(f"read-diagnostic:{kind}", **counts)
+    except Exception:
+        pass
     if not enabled() or _records >= 300:
         return
     try:
@@ -71,22 +80,48 @@ def emit_sidebar_observation(
     filtered: dict[str, int],
     paths: list[str],
     attempts: int,
+    scope: str | None = None,
 ) -> None:
     """Write bounded, redacted structure diagnostics for a sidebar read."""
 
-    safe_paths = sorted({path for value in paths if (path := _safe_route_path(value))})[:32]
-    emit(
-        "sidebar",
-        frameCount=max(0, int(frame_count)),
-        documentCount=max(0, int(document_count)),
-        menuRoots=max(0, int(menu_roots)),
-        menuCandidates=max(0, int(menu_candidates)),
-        supportedCandidates=max(0, int(supported_candidates)),
-        accepted=max(0, int(accepted)),
-        filtered={str(key): max(0, int(value)) for key, value in sorted(filtered.items())},
-        paths=safe_paths,
-        attempts=max(0, int(attempts)),
-    )
+    global _records
+    try:
+        debug_log.emit_sidebar(
+            frame_count=frame_count,
+            document_count=document_count,
+            menu_roots=menu_roots,
+            menu_candidates=menu_candidates,
+            supported_candidates=supported_candidates,
+            accepted=accepted,
+            filtered=filtered,
+            paths=list(paths),
+            attempts=attempts,
+            scope=scope,
+        )
+    except Exception:
+        pass
+    if not enabled() or _records >= 300:
+        return
+    try:
+        safe_paths = sorted({path for value in paths if (path := _safe_route_path(value))})[:32]
+        target = Path(__file__).resolve().parents[2] / ".work" / "classic-read-diagnostics-v3.jsonl"
+        target.parent.mkdir(exist_ok=True)
+        with target.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "kind": "sidebar",
+                "frameCount": max(0, int(frame_count)),
+                "documentCount": max(0, int(document_count)),
+                "menuRoots": max(0, int(menu_roots)),
+                "menuCandidates": max(0, int(menu_candidates)),
+                "supportedCandidates": max(0, int(supported_candidates)),
+                "accepted": max(0, int(accepted)),
+                "filtered": {str(key): max(0, int(value)) for key, value in sorted(filtered.items())},
+                "paths": safe_paths,
+                "attempts": max(0, int(attempts)),
+            }, ensure_ascii=True) + "\n")
+        _records += 1
+    except Exception:
+        pass
 
 
 def shape(source: str) -> dict[str, int]:

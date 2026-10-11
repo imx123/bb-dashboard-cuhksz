@@ -74,6 +74,27 @@ non-HTTPS schemes, embedded credentials and non-default ports are rejected.
 All browser calls use one serial queue. On stdio shutdown, browser context and
 Playwright are closed.
 
+### Passive debug log
+
+The sidecar writes a bounded `sidecar-debug.jsonl` under `BB_DEBUG_LOG_DIR`.
+When the host supplies `LMS_HOME`, the default is `${LMS_HOME}/logs`; otherwise
+the checkout's ignored `.work/logs` directory is used. Set `BB_DEBUG_LOG=0` to
+disable it. Each MCP call can carry an optional `trace_id`, which is kept in
+the worker operation and its Playwright callbacks. Records include step timing,
+safe navigation target and landing URLs, response status, course/resource IDs,
+sidebar structure counts, parser counts, and assignment detail/page budgets.
+Query values are retained only for stable course/content identifiers; SSO
+tokens, tickets, codes, state, session values and unknown query values are
+masked. Page text, HTML, response bodies, headers, cookies, credentials and
+profile paths are never written. The Python log is separate from the
+dashboard's `dashboard-debug.jsonl`. If the local sink cannot be written, the
+sidecar emits only the fixed stderr marker `BB_DEBUG_LOG_WRITE_FAILED`; it
+does not expose a path or exception string and does not change the MCP result.
+
+`BB_READ_DIAGNOSTICS=1` remains a separate, explicit opt-in diagnostic mode.
+Only that mode performs the existing bounded same-session HTML comparison;
+ordinary refreshes use passive event logging and add no diagnostic requests.
+
 ### Offline fixture mode
 
 Set `BB_OFFLINE_FIXTURE` to `test/fixtures/classic` and run the same `server.py`
@@ -124,6 +145,19 @@ python -m venv .venv
 `https://bb.cuhk.edu.cn/` 官方可见浏览器，用户自己完成登录和 MFA，再调用
 `action="complete"` 验证 portal。不会向 MCP、仓库或聊天发送密码、Cookie、验证码或
 token。profile 由 `BB_USER_DATA_DIR` 配置，默认位于用户自己的应用数据目录。
+
+Sidecar 默认写入有界 `sidecar-debug.jsonl`，目录由 `BB_DEBUG_LOG_DIR` 指定；
+若主进程提供 `LMS_HOME`，默认使用其 `logs` 子目录，否则使用仓库内被忽略的
+`.work/logs`。设置 `BB_DEBUG_LOG=0` 可关闭。MCP 工具可选携带 `trace_id`，它会
+贯穿同一次 worker 操作及 Playwright 回调。日志保留步骤耗时、脱敏后的导航目标与
+最终落点、响应状态、课程/资源稳定 ID、侧栏结构计数、解析计数和作业详情预算。
+SSO token、ticket、code、state、session 等票据和未知 query 值全部遮罩；不写入页面
+正文、HTML、响应体、headers、Cookie、凭据或 profile 路径。Python 日志与 dashboard
+的 `dashboard-debug.jsonl` 分开保存。若本地日志无法写入，sidecar 只向 stderr 输出固定
+标记 `BB_DEBUG_LOG_WRITE_FAILED`，不输出路径或异常文本，也不改变 MCP 结果。
+
+`BB_READ_DIAGNOSTICS=1` 仍是独立的显式诊断模式，只有该模式才执行既有的有界同会话
+HTML 对照请求；普通刷新只写被动事件，不增加诊断网络请求。
 
 ### 离线模式与测试
 

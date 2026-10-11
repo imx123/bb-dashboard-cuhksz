@@ -21,14 +21,14 @@ runtime = ConnectorRuntime()
 
 
 @mcp.tool()
-async def classic_status() -> dict[str, Any]:
+async def classic_status(trace_id: Optional[str] = None) -> dict[str, Any]:
     """Report the current local Blackboard session state without exposing credentials."""
 
-    return await runtime.call("status")
+    return await runtime.call("status", trace_id=trace_id)
 
 
 @mcp.tool()
-async def classic_login(action: str = "begin") -> dict[str, Any]:
+async def classic_login(action: str = "begin", trace_id: Optional[str] = None) -> dict[str, Any]:
     """Start or complete the user-controlled official Blackboard login.
 
     ``action='begin'`` opens or reuses the visible persistent browser. The user
@@ -36,7 +36,7 @@ async def classic_login(action: str = "begin") -> dict[str, Any]:
     No password, cookie, token, or credential file is accepted by this tool.
     """
 
-    return await runtime.call("login", action)
+    return await runtime.call("login", action, trace_id=trace_id)
 
 
 @mcp.tool()
@@ -44,31 +44,32 @@ async def classic_snapshot(
     course_ids: Optional[list[str]] = None,
     include: Optional[list[str]] = None,
     limits: Optional[dict[str, int]] = None,
+    trace_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Read one bounded Snapshot containing courses and selected resources."""
 
-    return await runtime.call("snapshot", course_ids=course_ids, include=include, limits=limits)
+    return await runtime.call("snapshot", course_ids=course_ids, include=include, limits=limits, trace_id=trace_id)
 
 
 @mcp.tool()
-async def classic_list_courses() -> dict[str, Any]:
+async def classic_list_courses(trace_id: Optional[str] = None) -> dict[str, Any]:
     """List courses visible to the authenticated user."""
 
-    return await runtime.call("list_courses")
+    return await runtime.call("list_courses", trace_id=trace_id)
 
 
 @mcp.tool()
-async def classic_announcements(course_id: str, limit: int = 8) -> dict[str, Any]:
+async def classic_announcements(course_id: str, limit: int = 8, trace_id: Optional[str] = None) -> dict[str, Any]:
     """Read a course's announcements; unavailable dates remain null."""
 
-    return await runtime.call("announcements", course_id, limit)
+    return await runtime.call("announcements", course_id, limit, trace_id=trace_id)
 
 
 @mcp.tool()
-async def classic_list_assignments(course_id: str, limit: int = 100) -> dict[str, Any]:
+async def classic_list_assignments(course_id: str, limit: int = 100, trace_id: Optional[str] = None) -> dict[str, Any]:
     """List assignment entries and evidence-backed due fields."""
 
-    return await runtime.call("assignments", course_id, limit=limit)
+    return await runtime.call("assignments", course_id, limit=limit, trace_id=trace_id)
 
 
 @mcp.tool()
@@ -76,17 +77,18 @@ async def classic_assignment_details(
     course_id: str,
     keyword: str = "",
     limit: int = 100,
+    trace_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Read assignment details with ``download`` permanently disabled."""
 
-    return await runtime.call("assignments", course_id, keyword=keyword, details=True, limit=limit)
+    return await runtime.call("assignments", course_id, keyword=keyword, details=True, limit=limit, trace_id=trace_id)
 
 
 @mcp.tool()
-async def classic_list_course_files(course_id: str, limit: int = 100) -> dict[str, Any]:
+async def classic_list_course_files(course_id: str, limit: int = 100, trace_id: Optional[str] = None) -> dict[str, Any]:
     """List course files and their page evidence; never downloads them."""
 
-    return await runtime.call("files", course_id, limit)
+    return await runtime.call("files", course_id, limit, trace_id=trace_id)
 
 
 def main() -> None:

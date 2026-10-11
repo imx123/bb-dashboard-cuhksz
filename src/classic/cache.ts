@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { atomicWrite, ensureHome, stateHome } from '../config.js';
+import { debugLog } from '../debug-log.js';
 import { ClassicError } from './errors.js';
 import { SnapshotSchema, type Snapshot } from './schema.js';
 
@@ -28,7 +29,9 @@ export class ClassicSnapshotCache {
   }
 
   async read(scope: string): Promise<Snapshot | undefined> {
-    const value = (await this.readAll())[key(scope)];
+    const cacheKey = key(scope);
+    const value = (await this.readAll())[cacheKey];
+    debugLog.event('classic.cache.read', { hit: Boolean(value), cacheKey: cacheKey.slice(0, 12) });
     return value ? structuredClone(value) : undefined;
   }
 
@@ -39,7 +42,14 @@ export class ClassicSnapshotCache {
       const all = await this.readAll().catch(() => ({} as CacheFile));
       all[key(scope)] = parsed;
       await atomicWrite(this.file, JSON.stringify(all));
+      debugLog.event('classic.cache.write', {
+        courseCount: parsed.courses.length,
+        announcementCount: parsed.announcements.length,
+        assignmentCount: parsed.assignments.length,
+        fileCount: parsed.files.length,
+      });
     } catch (error) {
+      debugLog.error('classic.cache.write.error', error);
       if (error instanceof ClassicError && error.code === 'CACHE_WRITE_FAILED') throw error;
       throw new ClassicError('CACHE_WRITE_FAILED', '本机缓存无法保存；本次数据仍可继续查看。', { cause: error });
     }

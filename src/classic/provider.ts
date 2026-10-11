@@ -2,6 +2,7 @@ import { ClassicSnapshotCache, mergeSnapshotWithCache } from './cache.js';
 import { parseSnapshotResult, parseStatusResult, errorEntry, makeSnapshot } from './adapter.js';
 import { ClassicError, errorCode, publicClassicError } from './errors.js';
 import { classicUserDataDir, ClassicMcpClient } from './mcp-client.js';
+import { debugLog } from '../debug-log.js';
 import type { Assignment, AuthResult, Snapshot } from './schema.js';
 
 export interface ClassicProviderOptions {
@@ -69,6 +70,8 @@ export class ClassicProvider {
 
   async load(days: number): Promise<Snapshot> {
     if (!Number.isInteger(days) || ![7, 14, 30].includes(days)) throw new ClassicError('BAD_INPUT', '请选择 7、14 或 30 天。', { recoverable: false });
+    const started = Date.now();
+    debugLog.event('classic.load.start', { days, source: this.source, maxCourses: this.maxCourses });
     const previous = this.last ?? await this.cache.read(this.scope).catch(() => undefined);
     try {
       const result = await this.client.call('classic_snapshot', {
@@ -84,16 +87,32 @@ export class ClassicProvider {
       const merged = mergeSnapshotWithCache(snapshot, previous);
       this.last = merged;
       await this.cache.write(this.scope, merged).catch(() => {});
-      return makeSnapshot({ ...merged, assignments: filterAssignments(merged.assignments, days) });
+      const output = makeSnapshot({ ...merged, assignments: filterAssignments(merged.assignments, days) });
+      debugLog.event('classic.load.done', {
+        elapsedMs: Date.now() - started,
+        state: output.state,
+        courseCount: output.courses.length,
+        announcementCount: output.announcements.length,
+        assignmentCount: output.assignments.length,
+        fileCount: output.files.length,
+        errorCount: output.errors.length,
+        cacheFallback: output.errors.some(error => error.code === 'CACHE_FALLBACK'),
+      });
+      return output;
     } catch (error) {
+      debugLog.error('classic.load.error', error, { elapsedMs: Date.now() - started });
       const snapshot = makeSnapshot({ state: isAuth(error) ? 'auth-required' : 'error', courses: [], announcements: [], assignments: [], files: [], errors: [errorEntry('snapshot', error)], source: this.source });
       const merged = mergeSnapshotWithCache(snapshot, previous);
       this.last = merged;
-      return makeSnapshot({ ...merged, assignments: filterAssignments(merged.assignments, days) });
+      const output = makeSnapshot({ ...merged, assignments: filterAssignments(merged.assignments, days) });
+      debugLog.event('classic.load.partial', { elapsedMs: Date.now() - started, state: output.state, courseCount: output.courses.length, errorCount: output.errors.length });
+      return output;
     }
   }
 
   async status(): Promise<{ ok: boolean; error?: ReturnType<typeof publicClassicError> }> {
+    const started = Date.now();
+    debugLog.event('classic.status.start');
     try {
       const status = parseStatusResult(await this.client.call('classic_status'));
       if (status.state === 'auth-required' || !status.authenticated) {
@@ -106,17 +125,24 @@ export class ClassicProvider {
         const first = status.errors[0];
         throw first ? new ClassicError(errorCode(first.code), first.message.slice(0, 240)) : new ClassicError('UPSTREAM_FAILED', 'Blackboard 当前状态无法确认。');
       }
+      debugLog.event('classic.status.done', { elapsedMs: Date.now() - started, authenticated: true });
       return { ok: true };
-    } catch (error) { return { ok: false, error: publicClassicError(error) }; }
+    } catch (error) {
+      debugLog.error('classic.status.error', error, { elapsedMs: Date.now() - started });
+      return { ok: false, error: publicClassicError(error) };
+    }
   }
 
   get snapshot(): Snapshot | undefined { return this.last; }
 
   async login(action: 'begin' | 'complete' = 'begin'): Promise<{ ok: boolean; state?: string; next?: string; error?: ReturnType<typeof publicClassicError> }> {
+    const started = Date.now();
+    debugLog.event('classic.login.start', { action });
     try {
       const status = parseStatusResult(await this.client.call('classic_login', { action }));
       const ok = status.state === 'ok' && status.authenticated;
       const first = status.errors[0];
+      debugLog.event('classic.login.done', { elapsedMs: Date.now() - started, action, state: status.state, authenticated: status.authenticated, errorCode: first?.code });
       return {
         ok,
         state: status.state,
@@ -124,10 +150,17 @@ export class ClassicProvider {
         ...(status.authResult ? { authResult: status.authResult } : {}),
         ...(!ok && first ? { error: statusError(first, status.authResult) } : {}),
       };
-    } catch (error) { return { ok: false, error: publicClassicError(error) }; }
+    } catch (error) {
+      debugLog.error('classic.login.error', error, { elapsedMs: Date.now() - started, action });
+      return { ok: false, error: publicClassicError(error) };
+    }
   }
 
-  async close(): Promise<void> { await this.client.close(); }
+  async close(): Promise<void> {
+    debugLog.event('classic.close.start');
+    await this.client.close();
+    debugLog.event('classic.close.done');
+  }
 }
 
 export { filterAssignments };

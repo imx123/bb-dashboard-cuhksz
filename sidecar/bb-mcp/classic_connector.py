@@ -22,6 +22,7 @@ import os
 import re
 import threading
 import time
+import debug_log
 import read_diagnostics
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1638,6 +1639,7 @@ class ManualAuthProvider:
             except Exception:
                 pass
             self._pw = None
+        debug_log.emit("context-start", scope="browser", phase="visible")
         self._pw = sync_playwright().start()
         try:
             self._ctx = self._pw.chromium.launch_persistent_context(
@@ -1653,6 +1655,8 @@ class ManualAuthProvider:
             except Exception:
                 pass
             self._ctx.set_default_timeout(connector.config.timeout_ms)
+            debug_log.attach_context(self._ctx)
+            debug_log.emit("context-ready", scope="browser", phase="visible")
         except Exception as exc:
             self.close()
             code = "TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "CONNECTOR_START_FAILED"
@@ -1877,6 +1881,18 @@ class ManualAuthProvider:
             and not combined["loginAnchor"]
             and not combined["sessionExpired"]
         )
+        debug_log.emit(
+            "auth-probe",
+            scope="auth",
+            phase=phase,
+            url=page_url,
+            authenticated=combined["authenticated"],
+            courseLinkCount=combined["courseLinkCount"],
+            marker=combined["marker"],
+            iframeCount=combined["iframeCount"],
+            sessionExpired=combined["sessionExpired"],
+            portalCandidate=combined["portalCandidate"],
+        )
         return combined
 
     @staticmethod
@@ -2024,13 +2040,33 @@ class ManualAuthProvider:
                 if remaining_ms <= 0:
                     break
                 target = safe_school_url(candidate, base_url=connector.config.base_url)
+                started = time.monotonic()
+                response = None
+                debug_log.emit_navigation_start(target, scope="auth", step="portal-candidate")
                 try:
-                    page.goto(target, timeout=remaining_ms, wait_until="domcontentloaded")
+                    response = page.goto(target, timeout=remaining_ms, wait_until="domcontentloaded")
                     remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
                     if remaining_ms:
                         ManualAuthProvider._wait_for_auth_page(page, remaining_ms)
                 except Exception as exc:
-                    timed_out = timed_out or exc.__class__.__name__.casefold().endswith("timeouterror")
+                    error_code = "TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "CONNECTOR_START_FAILED"
+                    timed_out = timed_out or error_code == "TIMEOUT"
+                    debug_log.emit_error(
+                        "navigation-error",
+                        scope="auth",
+                        code=error_code,
+                        exc=exc,
+                        step="portal-candidate",
+                    )
+                finally:
+                    debug_log.emit_navigation_end(
+                        target,
+                        debug_log.object_url(page),
+                        scope="auth",
+                        step="portal-candidate",
+                        status=debug_log.response_status(response),
+                        elapsed_ms=int(max(0.0, time.monotonic() - started) * 1000),
+                    )
                 probe = ManualAuthProvider._probe_page(page, phase="candidate", portal_target=target)
                 if best is None or ManualAuthProvider._probe_score(probe) > ManualAuthProvider._probe_score(best):
                     best = probe
@@ -2110,6 +2146,17 @@ class ManualAuthProvider:
             raise ConnectorError("CONNECTOR_START_FAILED", "无法检查 Blackboard 会话", scope="status") from exc
         valid = bool(probe.get("authenticated"))
         code, message = self._auth_failure(probe) if not valid else ("", "")
+        debug_log.emit(
+            "auth-result",
+            scope="auth",
+            code="OK" if valid else code,
+            authenticated=valid,
+            courseLinkCount=probe.get("courseLinkCount", 0),
+            marker=probe.get("marker", False),
+            iframeCount=probe.get("iframeCount", 0),
+            sessionExpired=probe.get("sessionExpired", False),
+            portalCandidate=probe.get("portalCandidate", False),
+        )
         next_step = (
             "保持官方 Blackboard 窗口打开后重试 classic_login(action='complete')"
             if code in {"AUTH_REQUIRED", "SESSION_EXPIRED"}
@@ -2158,7 +2205,29 @@ class ManualAuthProvider:
             except Exception:
                 pass
             target = safe_school_url("/", base_url=connector.config.base_url)
-            page.goto(target, timeout=connector.config.timeout_ms, wait_until="domcontentloaded")
+            started = time.monotonic()
+            response = None
+            debug_log.emit_navigation_start(target, scope="auth", step="login-begin")
+            try:
+                response = page.goto(target, timeout=connector.config.timeout_ms, wait_until="domcontentloaded")
+            except Exception as exc:
+                debug_log.emit_error(
+                    "navigation-error",
+                    scope="auth",
+                    code="TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "CONNECTOR_START_FAILED",
+                    exc=exc,
+                    step="login-begin",
+                )
+                raise
+            finally:
+                debug_log.emit_navigation_end(
+                    target,
+                    debug_log.object_url(page),
+                    scope="auth",
+                    step="login-begin",
+                    status=debug_log.response_status(response),
+                    elapsed_ms=int(max(0.0, time.monotonic() - started) * 1000),
+                )
             return {
                 "state": "auth-required",
                 "mode": "live",
@@ -2171,6 +2240,17 @@ class ManualAuthProvider:
         valid = bool(probe.get("authenticated"))
         if not valid:
             code, message = self._auth_failure(probe)
+            debug_log.emit(
+                "auth-result",
+                scope="auth",
+                code=code,
+                authenticated=False,
+                courseLinkCount=probe.get("courseLinkCount", 0),
+                marker=probe.get("marker", False),
+                iframeCount=probe.get("iframeCount", 0),
+                sessionExpired=probe.get("sessionExpired", False),
+                portalCandidate=probe.get("portalCandidate", False),
+            )
             next_step = (
                 "保持官方 Blackboard 窗口打开后重试 classic_login(action='complete')"
                 if code in {"AUTH_REQUIRED", "SESSION_EXPIRED"}
@@ -2184,6 +2264,17 @@ class ManualAuthProvider:
                 "authResult": self._public_auth_result(probe),
                 "errors": [{"scope": "auth", "code": code, "message": message}],
             }
+        debug_log.emit(
+            "auth-result",
+            scope="auth",
+            code="OK",
+            authenticated=True,
+            courseLinkCount=probe.get("courseLinkCount", 0),
+            marker=probe.get("marker", False),
+            iframeCount=probe.get("iframeCount", 0),
+            sessionExpired=probe.get("sessionExpired", False),
+            portalCandidate=probe.get("portalCandidate", False),
+        )
         return {"state": "ok", "mode": "live", "authenticated": True, "next": None, "authResult": self._public_auth_result(probe), "errors": []}
 
     def context(self) -> Any | None:
@@ -2265,6 +2356,7 @@ class ClassicConnector:
             raise ConnectorError("CONNECTOR_START_FAILED", "Playwright is not installed") from exc
         _configure_playwright_browsers_path()
         self.config.user_data_dir.mkdir(parents=True, exist_ok=True)
+        debug_log.emit("context-start", scope="browser", phase="temporary")
         pw = sync_playwright().start()
         try:
             ctx = pw.chromium.launch_persistent_context(
@@ -2276,6 +2368,8 @@ class ClassicConnector:
                 timeout=self.config.timeout_ms,
             )
             ctx.set_default_timeout(self.config.timeout_ms)
+            debug_log.attach_context(ctx)
+            debug_log.emit("context-ready", scope="browser", phase="temporary")
             # Keep the driver object attached so close can stop it safely.
             setattr(ctx, "_bb_mcp_pw", pw)
             return ctx
@@ -2369,6 +2463,7 @@ class ClassicConnector:
                 code, message = self.auth._auth_failure(state)
                 raise ConnectorError(code, message, scope="auth")
             raise ConnectorError("AUTH_REQUIRED", "需要用户在官方 Blackboard 页面完成登录", scope="auth")
+        debug_log.attach_context(ctx)
         read_diagnostics.attach(ctx)
         return ctx, own
 
@@ -2387,14 +2482,39 @@ class ClassicConnector:
                                 if isinstance(self.auth, ManualAuthProvider)
                                 else safe_school_url(PORTAL_TAB, base_url=self.config.base_url)
                             )
-                            page.goto(target, timeout=self._remaining_timeout_ms(deadline, "courses"), wait_until="domcontentloaded")
-                            if isinstance(self.auth, ManualAuthProvider):
-                                self.auth._wait_for_auth_page(page, self._remaining_timeout_ms(deadline, "courses"))
-                            _assert_page_school_url(page, base_url=self.config.base_url)
-                            self._wait_dynamic(page, deadline=deadline, scope="courses")
-                            page_html = self._page_source(page)
-                            result = parse_courses_checked(page_html, base_url=self.config.base_url, limit=self.config.max_courses)
-                            return result
+                            started = time.monotonic()
+                            response = None
+                            debug_log.emit_navigation_start(target, scope="courses", step="portal")
+                            try:
+                                response = page.goto(target, timeout=self._remaining_timeout_ms(deadline, "courses"), wait_until="domcontentloaded")
+                                if isinstance(self.auth, ManualAuthProvider):
+                                    self.auth._wait_for_auth_page(page, self._remaining_timeout_ms(deadline, "courses"))
+                                _assert_page_school_url(page, base_url=self.config.base_url)
+                                self._wait_dynamic(page, deadline=deadline, scope="courses")
+                                page_html = self._page_source(page)
+                                result = parse_courses_checked(page_html, base_url=self.config.base_url, limit=self.config.max_courses)
+                                debug_log.emit("parsed-courses", scope="courses", count=len(result))
+                                return result
+                            except ConnectorError as exc:
+                                debug_log.emit_error("courses-error", scope="courses", code=exc.code, exc=exc)
+                                raise
+                            except Exception as exc:
+                                debug_log.emit_error(
+                                    "courses-error",
+                                    scope="courses",
+                                    code="TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "CONNECTOR_START_FAILED",
+                                    exc=exc,
+                                )
+                                raise
+                            finally:
+                                debug_log.emit_navigation_end(
+                                    target,
+                                    debug_log.object_url(page),
+                                    scope="courses",
+                                    step="portal",
+                                    status=debug_log.response_status(response),
+                                    elapsed_ms=int(max(0.0, time.monotonic() - started) * 1000),
+                                )
                         finally:
                             page.close()
                             if own:
@@ -2461,6 +2581,49 @@ class ClassicConnector:
             # usable after the bounded wait expires.
             pass
         page.wait_for_timeout(min(700, self._remaining_timeout_ms(deadline, scope)))
+
+    def _goto(
+        self,
+        page: Any,
+        target: str,
+        *,
+        deadline: float | None,
+        scope: str,
+        step: str,
+    ) -> Any:
+        """Navigate once while recording only redacted target/landing metadata."""
+
+        started = time.monotonic()
+        response = None
+        debug_log.emit_navigation_start(target, scope=scope, step=step)
+        try:
+            response = page.goto(
+                target,
+                timeout=self._remaining_timeout_ms(deadline, scope),
+                wait_until="domcontentloaded",
+            )
+            return response
+        except ConnectorError as exc:
+            debug_log.emit_error("navigation-error", scope=scope, code=exc.code, exc=exc, step=step)
+            raise
+        except Exception as exc:
+            debug_log.emit_error(
+                "navigation-error",
+                scope=scope,
+                code="TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "CONNECTOR_START_FAILED",
+                exc=exc,
+                step=step,
+            )
+            raise
+        finally:
+            debug_log.emit_navigation_end(
+                target,
+                debug_log.object_url(page),
+                scope=scope,
+                step=step,
+                status=debug_log.response_status(response),
+                elapsed_ms=int(max(0.0, time.monotonic() - started) * 1000),
+            )
 
     def _page_source(self, page: Any) -> str:
         """Read top-level Classic HTML plus same-origin course frames only."""
@@ -2785,11 +2948,30 @@ class ClassicConnector:
                         seen.add(key)
                         entries.append(_SidebarEntry(kind, resolved, label))
 
+            frame_list = list(getattr(page, "frames", ()) or ())
             if recognized and menu_candidates > 0:
+                try:
+                    read_diagnostics.emit_sidebar_observation(
+                        frame_count=len(frame_list),
+                        document_count=len(documents),
+                        menu_roots=roots_seen,
+                        menu_candidates=menu_candidates,
+                        supported_candidates=supported_candidates,
+                        accepted=len(entries),
+                        filtered=filtered,
+                        paths=[
+                            getattr(page, "url", ""),
+                            *[getattr(frame, "url", "") for frame in frame_list],
+                            *[entry.url for entry in entries],
+                        ],
+                        attempts=attempt,
+                        scope=read_scope,
+                    )
+                except Exception:
+                    pass
                 return _SidebarRead(tuple(entries), True, tuple(errors))
             if attempt >= max_attempts:
                 if not recognized or menu_candidates == 0:
-                    frame_list = list(getattr(page, "frames", ()) or ())
                     reason_text = ",".join(
                         f"{key}={value}"
                         for key, value in sorted(filtered.items())
@@ -2800,7 +2982,7 @@ class ClassicConnector:
                         "课程侧栏布局无法识别（frames=%d, documents=%d, menuRoots=%d, menuCandidates=%d, filtered=%s）"
                         % (len(frame_list), len(documents), roots_seen, menu_candidates, reason_text[:180]),
                     ))
-                    if read_diagnostics.enabled():
+                    try:
                         read_diagnostics.emit_sidebar_observation(
                             frame_count=len(frame_list),
                             document_count=len(documents),
@@ -2812,9 +2994,13 @@ class ClassicConnector:
                             paths=[
                                 getattr(page, "url", ""),
                                 *[getattr(frame, "url", "") for frame in frame_list],
+                                *[entry.url for entry in entries],
                             ],
                             attempts=attempt,
+                            scope=read_scope,
                         )
+                    except Exception:
+                        pass
                 return _SidebarRead(tuple(entries), False, tuple(errors))
             wait_ms = min(350, self._remaining_timeout_ms(deadline, read_scope))
             try:
@@ -2865,11 +3051,31 @@ class ClassicConnector:
             for index, item in enumerate(result):
                 detail_scope = f"{scope}:detail:{str(item.get('id') or index)[:120]}"
                 if pages_read >= self.config.max_content_pages:
+                    debug_log.emit(
+                        "assignment-detail-skipped",
+                        scope=detail_scope,
+                        courseId=course_id,
+                        assignmentId=item.get("id") or index,
+                        pagesRead=pages_read,
+                        maxPages=self.config.max_content_pages,
+                        code="PARTIAL_RESULTS",
+                    )
                     errors.append({"scope": detail_scope, "code": "PARTIAL_RESULTS", "message": "作业详情达到本次读取页数上限，已保留列表数据"})
                     break
                 if deadline is not None and time.monotonic() >= deadline:
+                    debug_log.emit(
+                        "assignment-detail-skipped",
+                        scope=detail_scope,
+                        courseId=course_id,
+                        assignmentId=item.get("id") or index,
+                        pagesRead=pages_read,
+                        maxPages=self.config.max_content_pages,
+                        deadlineMs=0,
+                        code="TIMEOUT",
+                    )
                     errors.append({"scope": detail_scope, "code": "TIMEOUT", "message": "作业详情达到本次读取时间上限，已保留列表数据"})
                     break
+                detail_started: float | None = None
                 try:
                     target = _assignment_detail_url(str(item.get("url") or ""), base_url=self.config.base_url)
                     # Normalize before consuming the shared navigation budget:
@@ -2877,11 +3083,21 @@ class ClassicConnector:
                     # target consumes one slot before goto, including failed
                     # requests and failed page parsing.
                     pages_read += 1
-                    page.goto(
-                        target,
-                        timeout=self._remaining_timeout_ms(deadline, detail_scope),
-                        wait_until="domcontentloaded",
+                    detail_started = time.monotonic()
+                    debug_log.emit(
+                        "assignment-detail-start",
+                        scope=detail_scope,
+                        courseId=course_id,
+                        assignmentId=item.get("id") or index,
+                        pagesRead=pages_read,
+                        maxPages=self.config.max_content_pages,
+                        deadlineMs=(
+                            max(0, int((deadline - time.monotonic()) * 1000))
+                            if deadline is not None
+                            else None
+                        ),
                     )
+                    self._goto(page, target, deadline=deadline, scope=detail_scope, step="assignment-detail")
                     self._wait_dynamic(page, deadline=deadline, scope=detail_scope)
                     # Keep the final landing URL only as the base for relative
                     # attachment links.  Do not impose a second Blackboard
@@ -2896,13 +3112,43 @@ class ClassicConnector:
                         detail_item,
                         base_url=self.config.base_url,
                     )
+                    debug_log.emit_detail(
+                        scope=detail_scope,
+                        course_id=course_id,
+                        assignment_id=item.get("id") or index,
+                        pages_read=pages_read,
+                        max_pages=self.config.max_content_pages,
+                        landing=final_target,
+                        code="ok",
+                        elapsed_ms=int(max(0.0, time.monotonic() - detail_started) * 1000),
+                    )
                 except ConnectorError as exc:
+                    debug_log.emit_detail(
+                        scope=detail_scope,
+                        course_id=course_id,
+                        assignment_id=item.get("id") or index,
+                        pages_read=pages_read,
+                        max_pages=self.config.max_content_pages,
+                        landing=debug_log.object_url(page),
+                        code=exc.code,
+                        elapsed_ms=int(max(0.0, time.monotonic() - detail_started) * 1000) if detail_started is not None else None,
+                    )
                     errors.append({"scope": detail_scope, "code": exc.code, "message": str(exc)})
                     if exc.code == "TIMEOUT" and deadline is not None and time.monotonic() >= deadline:
                         break
                 except Exception as exc:
                     code = "TIMEOUT" if exc.__class__.__name__.casefold().endswith("timeouterror") else "COURSE_PARSE_CHANGED"
                     message = "作业详情读取超时，已保留列表数据" if code == "TIMEOUT" else "作业详情页面布局无法识别，已保留列表数据"
+                    debug_log.emit_detail(
+                        scope=detail_scope,
+                        course_id=course_id,
+                        assignment_id=item.get("id") or index,
+                        pages_read=pages_read,
+                        max_pages=self.config.max_content_pages,
+                        landing=debug_log.object_url(page),
+                        code=code,
+                        elapsed_ms=int(max(0.0, time.monotonic() - detail_started) * 1000) if detail_started is not None else None,
+                    )
                     errors.append({"scope": detail_scope, "code": code, "message": message})
                     if code == "TIMEOUT":
                         break
@@ -2920,14 +3166,14 @@ class ClassicConnector:
         page = ctx.new_page()
         target = safe_school_url(LAUNCHER.format(course_id=course_id), base_url=self.config.base_url)
         read_scope = scope or f"course:{course_id}:content"
-        page.goto(target, timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+        self._goto(page, target, deadline=deadline, scope=read_scope, step="course-launcher")
         self._wait_dynamic(page, deadline=deadline, scope=read_scope)
         _assert_page_school_url(page, base_url=self.config.base_url)
         if content:
             sidebar = self._read_sidebar(page, course_id, deadline=deadline, scope=read_scope)
             target_content = next((entry.url for entry in sidebar.entries if entry.kind == "content"), None)
             if target_content:
-                page.goto(target_content, timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+                self._goto(page, target_content, deadline=deadline, scope=read_scope, step="course-content")
                 self._wait_dynamic(page, deadline=deadline, scope=read_scope)
                 _assert_page_school_url(page, base_url=self.config.base_url)
         return page
@@ -2952,6 +3198,13 @@ class ClassicConnector:
         read_scope = scope or f"course:{course_id}:content"
 
         def record_error(code: str, message: str) -> None:
+            debug_log.emit(
+                "content-budget",
+                scope=read_scope,
+                code=code,
+                pagesRead=pages_read,
+                maxPages=self.config.max_content_pages,
+            )
             error = {"scope": read_scope, "code": code, "message": message}
             if budget_errors is None:
                 raise ConnectorError(code, message, scope=read_scope)
@@ -2964,7 +3217,7 @@ class ClassicConnector:
         pages_read = 0
         try:
             launcher = safe_school_url(LAUNCHER.format(course_id=course_id), base_url=self.config.base_url)
-            page.goto(launcher, timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+            self._goto(page, launcher, deadline=deadline, scope=read_scope, step="course-launcher")
             self._wait_dynamic(page, deadline=deadline, scope=read_scope)
             _assert_page_school_url(page, base_url=self.config.base_url)
             sidebar = self._read_sidebar(page, course_id, deadline=deadline, scope=read_scope)
@@ -3009,7 +3262,7 @@ class ClassicConnector:
                 # this point, so skipped links never consume a slot.
                 pages_read += 1
                 try:
-                    page.goto(href, timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+                    self._goto(page, href, deadline=deadline, scope=read_scope, step="content-page")
                     self._wait_dynamic(page, deadline=deadline, scope=read_scope)
                     _assert_page_school_url(page, base_url=self.config.base_url)
                     source = self._page_source(page)
@@ -3040,13 +3293,22 @@ class ClassicConnector:
                         for document_url, document in documents
                         for document_root in (_parse_dom(document),)
                     ) if documents else _has_valid_content_page_evidence(page_root, page.url, course_id)
+                    debug_log.emit(
+                        "content-page",
+                        scope=read_scope,
+                        landing=debug_log.object_url(page),
+                        pagesRead=pages_read,
+                        maxPages=self.config.max_content_pages,
+                        code="OK" if page_evidence else "COURSE_PARSE_CHANGED",
+                    )
                     if page_evidence:
                         verified_course_page = True
                     else:
                         content_error = ("COURSE_PARSE_CHANGED", "课程内容页布局无法识别，已保留其他成功页面")
                         if content_error not in content_errors:
                             content_errors.append(content_error)
-                except ConnectorError:
+                except ConnectorError as exc:
+                    debug_log.emit_error("content-parse-error", scope=read_scope, code=exc.code, exc=exc)
                     page_root = None
                     content_error = ("COURSE_PARSE_CHANGED", "课程内容页无法解析，已保留其他成功页面")
                     if content_error not in content_errors:
@@ -3101,7 +3363,13 @@ class ClassicConnector:
         try:
             if kind == "announcements":
                 page = ctx.new_page()
-                page.goto(safe_school_url(LAUNCHER.format(course_id=course_id), base_url=self.config.base_url), timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+                self._goto(
+                    page,
+                    safe_school_url(LAUNCHER.format(course_id=course_id), base_url=self.config.base_url),
+                    deadline=deadline,
+                    scope=read_scope,
+                    step="course-launcher",
+                )
                 self._wait_dynamic(page, deadline=deadline, scope=read_scope)
                 _assert_page_school_url(page, base_url=self.config.base_url)
                 sidebar = self._read_sidebar(page, course_id, deadline=deadline, scope=read_scope)
@@ -3122,7 +3390,7 @@ class ClassicConnector:
                         errors.append(("TIMEOUT", "Blackboard 快照达到本次读取时间上限，已保留此前成功内容"))
                         break
                     try:
-                        page.goto(target, timeout=self._remaining_timeout_ms(deadline, read_scope), wait_until="domcontentloaded")
+                        self._goto(page, target, deadline=deadline, scope=read_scope, step="announcement-area")
                         self._wait_dynamic(page, deadline=deadline, scope=read_scope)
                         _assert_page_school_url(page, base_url=self.config.base_url)
                         documents = self._page_documents(page, course_id=course_id)
@@ -3190,13 +3458,17 @@ class ClassicConnector:
                     content = source
                     resource_errors = _scoped_content_errors(content, scope)
                     if not content.html:
+                        debug_log.emit("parsed-announcements", scope=scope, count=0)
                         return self._resource("announcements", [], errors=resource_errors)
                     values = parse_announcements(content.html, normalized_id, base_url=self.config.base_url, limit=limit)
+                    debug_log.emit("parsed-announcements", scope=scope, count=len(values))
                     return self._resource("announcements", values, errors=resource_errors)
                 values = parse_announcements(source, normalized_id, base_url=self.config.base_url, limit=limit)
+                debug_log.emit("parsed-announcements", scope=scope, count=len(values))
                 return self._resource("announcements", values)
             except ConnectorError as exc:
                 scope = f"course:{normalized_id}:announcements" if normalized_id else "announcements"
+                debug_log.emit_error("resource-error", scope=scope, code=exc.code, exc=exc)
                 errors = _scoped_content_errors(content, scope)
                 current = self._error(exc, scope)
                 if not any(item.get("code") == current.get("code") and item.get("scope") == current.get("scope") for item in errors):
@@ -3260,6 +3532,7 @@ class ClassicConnector:
                 return self._resource("assignments", values, errors=resource_errors)
             except ConnectorError as exc:
                 scope = f"course:{normalized_id}:assignments" if normalized_id else "assignments"
+                debug_log.emit_error("resource-error", scope=scope, code=exc.code, exc=exc)
                 errors = _scoped_content_errors(content, scope) + budget_errors + detail_errors
                 current = self._error(exc, scope)
                 if not any(item.get("scope") == current["scope"] and item.get("code") == current["code"] for item in errors):
@@ -3304,6 +3577,7 @@ class ClassicConnector:
                 return self._resource("files", values, errors=resource_errors)
             except ConnectorError as exc:
                 scope = f"course:{normalized_id}:files" if normalized_id else "files"
+                debug_log.emit_error("resource-error", scope=scope, code=exc.code, exc=exc)
                 errors = _scoped_content_errors(content, scope) + budget_errors
                 current = self._error(exc, scope)
                 if not any(item.get("scope") == current["scope"] and item.get("code") == current["code"] for item in errors):
@@ -3323,10 +3597,12 @@ class ClassicConnector:
         """Return one bounded read-only snapshot for the Electron client."""
 
         with self._serial():
+            debug_log.emit("snapshot-start", scope="snapshot")
             deadline = time.monotonic() + max(30_000, self.config.snapshot_timeout_ms) / 1000
             try:
                 course_result = self.list_courses(deadline=deadline)
             except ConnectorError as exc:
+                debug_log.emit_error("snapshot-end", scope="snapshot", code=exc.code, exc=exc, errors=1)
                 return Snapshot("error", now_iso(), errors=(self._error(exc, "courses"),)).as_dict()
             courses = list(course_result.get("courses", []))
             course_map = {course["id"]: course for course in courses}
@@ -3337,6 +3613,13 @@ class ClassicConnector:
                     "code": "TIMEOUT",
                     "message": "Blackboard 快照达到本次读取时间上限，已保留课程列表",
                 })
+                debug_log.emit(
+                    "snapshot-end",
+                    scope="snapshot",
+                    courses=len(courses),
+                    errors=len(errors),
+                    code="TIMEOUT",
+                )
                 return Snapshot(
                     self._state_for_errors(errors, has_values=bool(courses)),
                     now_iso(),
@@ -3347,6 +3630,14 @@ class ClassicConnector:
                 wanted = {_safe_course_id(cid) for cid in course_ids} if course_ids else {c["id"] for c in courses}
             except ConnectorError as exc:
                 errors.append(self._error(exc, "snapshot:course_ids"))
+                debug_log.emit_error(
+                    "snapshot-end",
+                    scope="snapshot",
+                    code=exc.code,
+                    exc=exc,
+                    courses=len(courses),
+                    errors=len(errors),
+                )
                 return Snapshot(
                     self._state_for_errors(errors, has_values=bool(courses)),
                     now_iso(),
@@ -3432,6 +3723,15 @@ class ClassicConnector:
                         except ConnectorError as exc:
                             errors.append(self._error(exc, scope))
             state = self._state_for_errors(errors, has_values=bool(courses or announcements or assignments or files))
+            debug_log.emit(
+                "snapshot-end",
+                scope="snapshot",
+                courses=len(courses),
+                announcements=len(announcements),
+                assignments=len(assignments),
+                files=len(files),
+                errors=len(errors),
+            )
             return Snapshot(
                 state,
                 now_iso(),

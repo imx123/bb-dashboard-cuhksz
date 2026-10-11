@@ -9,6 +9,8 @@
 **/*profile*/
 **/cred.json
 **/*.log
+**/logs/
+**/*debug*.jsonl
 
 # Runtime state, caches, downloads, and build output
 **/.runtime/

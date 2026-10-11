@@ -15,6 +15,7 @@ from threading import Lock
 from typing import Any, Callable
 
 from classic_connector import ClassicConnector
+import debug_log
 
 
 class ConnectorRuntime:
@@ -32,26 +33,39 @@ class ConnectorRuntime:
             self._connector = self._factory()
         return self._connector
 
-    def _invoke(self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-        connector = self._ensure_connector()
-        operation = getattr(connector, method)
-        return operation(*args, **kwargs)
+    def _invoke(
+        self,
+        method: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        trace_id: str | None,
+    ) -> Any:
+        # The trace identifier belongs to the worker operation, never to a
+        # connector method's business arguments.  ContextVar keeps it on the
+        # Playwright-owning thread so navigation callbacks inherit it.
+        with debug_log.operation(trace_id, method):
+            connector = self._ensure_connector()
+            operation = getattr(connector, method)
+            return operation(*args, **kwargs)
 
-    async def call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+    async def call(self, method: str, *args: Any, trace_id: str | None = None, **kwargs: Any) -> Any:
         """Run one known connector method without moving its objects."""
 
         with self._lock:
             if self._closed:
                 raise RuntimeError("connector runtime is closed")
+        worker_trace = debug_log.normalise_trace_id(trace_id)
+        debug_log.emit_for_trace(worker_trace, "worker-queued", operation=method)
         loop = asyncio.get_running_loop()
-        future = self._executor.submit(self._invoke, method, args, kwargs)
+        future = self._executor.submit(self._invoke, method, args, kwargs, worker_trace)
         return await asyncio.wrap_future(future, loop=loop)
 
     def _close_worker(self) -> None:
-        connector = self._connector
-        self._connector = None
-        if connector is not None:
-            connector.close()
+        with debug_log.operation(None, "runtime-close"):
+            connector = self._connector
+            self._connector = None
+            if connector is not None:
+                connector.close()
 
     def close_sync(self) -> None:
         """Close Playwright on its owner thread and then stop the worker."""
