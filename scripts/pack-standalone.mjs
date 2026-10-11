@@ -16,7 +16,7 @@ const output = join(root, 'release-cli');
 const name = `lms-cli-${pkg.version}-${process.platform}-${process.arch}.tar.gz`;
 try {
   await mkdir(join(stage, 'app'));
-  for (const path of ['package.json', 'package-lock.json', 'bin', 'dist', 'plugins', 'docs', 'README.md', 'PRIVACY.md', 'SECURITY.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) await cp(join(root, path), join(stage, 'app', path), { recursive: true });
+  for (const path of ['package.json', 'package-lock.json', 'bin', 'dist', 'plugins', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md']) await cp(join(root, path), join(stage, 'app', path), { recursive: true });
   for (const platform of ['canvas', 'blackboard']) {
     await mkdir(join(stage, 'app', 'vendor', platform), { recursive: true });
     await cp(join(root, 'vendor', platform, 'LICENSE'), join(stage, 'app', 'vendor', platform, 'LICENSE'));

@@ -12,7 +12,7 @@
   "engines": { "node": ">=22.16.0" },
   "bin": { "lms": "bin/lms.js" },
   "main": "dist/src/auth/app.js",
-  "files": ["bin", "dist", "plugins/lms-cli", "scripts/launchers", "docs", "vendor/*/LICENSE", "README.md", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "LICENSE"],
+  "files": ["bin", "dist", "plugins/lms-cli", "scripts/launchers", "vendor/*/LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "LICENSE"],
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
