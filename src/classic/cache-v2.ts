@@ -4,6 +4,7 @@ import { vault } from '../vault.js';
 import { ClassicApiError } from './api-errors.js';
 import { CLASSIC_API_ORIGIN } from './api-contract.js';
 import { SnapshotV2Schema, type AnnouncementV2, type AssignmentV2, type CourseFileV2, type SnapshotV2 } from './schema-v2.js';
+import type { ClassicCachedResource } from './detail-reader.js';
 
 export interface ClassicCacheIdentity {
   readonly profileId: string;
@@ -17,6 +18,7 @@ interface CacheEnvelope {
   schemaVersion: 2;
   identity: Omit<ClassicCacheIdentity, 'sessionGeneration'> & { sessionGeneration: number };
   snapshot: SnapshotV2;
+  resources?: readonly ClassicCachedResource[];
 }
 
 interface CacheFile {
@@ -81,6 +83,50 @@ function parsedIdentity(value: unknown): CacheEnvelope['identity'] {
   return identity;
 }
 
+const CACHE_RESOURCE_ID = /^[a-f0-9-]{20,80}$/i;
+const CACHE_RESOURCE_CONTEXT_ID = /^[A-Za-z0-9_.:-]{1,300}$/;
+const CACHE_RESOURCE_KEY = /^[a-z0-9][a-z0-9_-]{0,120}$/i;
+const CACHE_SENSITIVE_QUERY = /(?:token|ticket|code|saml|relay|state|session|jsession|cookie|auth|password|secret|signature|assertion|credential|nonce|key|otp|mfa)/i;
+
+function parsedCachedResource(value: unknown): ClassicCachedResource | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const kind = item.kind === 'image' ? 'image' : item.kind === 'attachment' ? 'attachment' : null;
+  if (typeof item.resourceId !== 'string' || !CACHE_RESOURCE_ID.test(item.resourceId) ||
+      typeof item.url !== 'string' || !kind ||
+      (item.mimeType !== null && typeof item.mimeType !== 'string') || typeof item.maxBytes !== 'number' ||
+      !Number.isInteger(item.maxBytes) || item.maxBytes < 1 || item.maxBytes > 24 * 1024 * 1024) return null;
+  let url: URL;
+  try { url = new URL(item.url); } catch { return null; }
+  if (url.protocol !== 'https:' || url.origin !== CLASSIC_API_ORIGIN || url.username || url.password || url.port || url.hash) return null;
+  for (const [key] of url.searchParams) if (CACHE_SENSITIVE_QUERY.test(key)) return null;
+  const courseId = item.courseId === undefined ? undefined : typeof item.courseId === 'string' && CACHE_RESOURCE_CONTEXT_ID.test(item.courseId) ? item.courseId : null;
+  const contentId = item.contentId === undefined ? undefined : typeof item.contentId === 'string' && CACHE_RESOURCE_CONTEXT_ID.test(item.contentId) ? item.contentId : null;
+  if (courseId === null || contentId === null) return null;
+  const sourcePageUrl = item.sourcePageUrl === undefined ? undefined : typeof item.sourcePageUrl === 'string' ? item.sourcePageUrl : null;
+  if (sourcePageUrl === null) return null;
+  if (sourcePageUrl !== undefined) {
+    try {
+      const page = new URL(sourcePageUrl);
+      if (page.protocol !== 'https:' || page.origin !== CLASSIC_API_ORIGIN || page.username || page.password || page.port || page.hash) return null;
+      for (const [key] of page.searchParams) if (CACHE_SENSITIVE_QUERY.test(key)) return null;
+    } catch { return null; }
+  }
+  const resourceKey = item.resourceKey === undefined ? undefined : typeof item.resourceKey === 'string' && CACHE_RESOURCE_KEY.test(item.resourceKey) ? item.resourceKey : null;
+  if (resourceKey === null) return null;
+  return {
+    resourceId: item.resourceId,
+    url: url.href,
+    kind,
+    ...(courseId ? { courseId } : {}),
+    ...(contentId ? { contentId } : {}),
+    ...(sourcePageUrl !== undefined ? { sourcePageUrl } : {}),
+    ...(resourceKey !== undefined ? { resourceKey } : {}),
+    mimeType: item.mimeType as string | null,
+    maxBytes: item.maxBytes,
+  };
+}
+
 function validateFile(value: unknown): CacheFile {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid cache root');
   const root = value as Record<string, unknown>;
@@ -93,7 +139,10 @@ function validateFile(value: unknown): CacheFile {
     const identity = parsedIdentity(envelope.identity);
     const expectedKey = cacheKey({ profileId: identity.profileId, origin: identity.origin, userId: identity.userId, source: identity.source });
     if (key !== expectedKey) throw new Error('cache entry identity mismatch');
-    entries[key] = { schemaVersion: 2, identity, snapshot: SnapshotV2Schema.parse(envelope.snapshot) };
+    const resources = Array.isArray(envelope.resources)
+      ? envelope.resources.map(parsedCachedResource).filter((item): item is ClassicCachedResource => item !== null).slice(0, 2_000)
+      : undefined;
+    entries[key] = { schemaVersion: 2, identity, snapshot: SnapshotV2Schema.parse(envelope.snapshot), ...(resources?.length ? { resources } : {}) };
   }
   return { version: 2, entries };
 }
@@ -211,6 +260,11 @@ export interface ClassicSnapshotCacheOptions {
   readonly maxAgeMs?: number;
 }
 
+export interface ClassicSnapshotCacheRead {
+  readonly snapshot: SnapshotV2;
+  readonly resources: readonly ClassicCachedResource[];
+}
+
 export class ClassicSnapshotV2Cache {
   private readonly store: ClassicProtectedCacheStore;
   private readonly maxAgeMs: number;
@@ -229,7 +283,7 @@ export class ClassicSnapshotV2Cache {
     }
   }
 
-  async read(identity: ClassicCacheIdentity): Promise<SnapshotV2 | undefined> {
+  async readWithResources(identity: ClassicCacheIdentity): Promise<ClassicSnapshotCacheRead | undefined> {
     validIdentity(identity);
     const all = await this.readFile();
     const entry = all.entries[cacheKey(identityWithoutGeneration(identity))];
@@ -238,26 +292,31 @@ export class ClassicSnapshotV2Cache {
     const tooOld = !Number.isFinite(fetchedAt) || Date.now() - fetchedAt > this.maxAgeMs;
     const stale = entry.identity.sessionGeneration !== identity.sessionGeneration || tooOld;
     const snapshot = stale ? markStale(entry.snapshot) : structuredClone(entry.snapshot);
-    debugLog.event('classic.cache-v2.read', { hit: true, stale, tooOld, source: identity.source, userIdPresent: true });
-    return snapshot;
+    debugLog.event('classic.cache-v2.read', { hit: true, stale, tooOld, source: identity.source, userIdPresent: true, resourceContextCount: entry.resources?.length ?? 0 });
+    return { snapshot, resources: entry.resources ?? [] };
   }
 
-  async write(identity: ClassicCacheIdentity, snapshot: SnapshotV2, guard?: () => void): Promise<void> {
+  async read(identity: ClassicCacheIdentity): Promise<SnapshotV2 | undefined> {
+    return (await this.readWithResources(identity))?.snapshot;
+  }
+
+  async write(identity: ClassicCacheIdentity, snapshot: SnapshotV2, guard?: () => void, resources: readonly ClassicCachedResource[] = []): Promise<void> {
     validIdentity(identity);
     const parsed = SnapshotV2Schema.parse(snapshot);
+    const parsedResources = resources.map(parsedCachedResource).filter((item): item is ClassicCachedResource => item !== null).slice(0, 2_000);
     const scope = identityWithoutGeneration(identity);
     try {
       guard?.();
       if (this.store.update) {
         await this.store.update(previous => {
           const all = previous === null ? emptyFile() : validateFile(previous);
-          all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed };
+          all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
           guard?.();
           return all;
         });
       } else {
         const all = await this.readFile();
-        all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed };
+        all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
         guard?.();
         await this.store.write(all);
       }
@@ -266,7 +325,7 @@ export class ClassicSnapshotV2Cache {
       if (error instanceof ClassicApiError && ['CACHE_FALLBACK', 'SESSION_EXPIRED', 'AUTH_REQUIRED', 'TIMEOUT'].includes(error.code)) throw error;
       throw new ClassicApiError('CACHE_FALLBACK', 'Classic v2 缓存无法保存；本次数据仍可继续查看。', { scope: 'cache-v2.write', stale: true, cause: error });
     }
-    debugLog.event('classic.cache-v2.write', { source: identity.source, userIdPresent: true, courseCount: parsed.courses.length });
+    debugLog.event('classic.cache-v2.write', { source: identity.source, userIdPresent: true, courseCount: parsed.courses.length, resourceContextCount: parsedResources.length });
   }
 }
 

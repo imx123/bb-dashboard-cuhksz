@@ -5,7 +5,7 @@ export type ClassicApiOrigin = typeof CLASSIC_API_ORIGIN;
 
 export type TraceId = string;
 export type ClassicApiMethod = 'GET' | 'HEAD';
-export type ClassicApiResource = 'identity' | 'memberships' | 'courses' | 'announcements' | 'contents' | 'grades' | 'attempts' | 'attachments' | 'calendar' | 'version';
+export type ClassicApiResource = 'identity' | 'memberships' | 'courses' | 'announcements' | 'contents' | 'grades' | 'attempts' | 'attachments' | 'calendar' | 'version' | 'source-page';
 
 export interface ClassicAccountContext {
   readonly profileId: string;

@@ -7,6 +7,18 @@ import { sanitizeRichBody } from './rich-text.js';
 import { AssignmentV2Schema, emptyRichBody, type AssignmentV2, type AttachmentV2, type RichBody } from './schema-v2.js';
 import { CLASSIC_API_ORIGIN } from './api-contract.js';
 
+export interface ClassicCachedResource {
+  readonly resourceId: string;
+  readonly url: string;
+  readonly kind: 'image' | 'attachment';
+  readonly courseId?: string;
+  readonly contentId?: string;
+  readonly sourcePageUrl?: string;
+  readonly resourceKey?: string;
+  readonly mimeType: string | null;
+  readonly maxBytes: number;
+}
+
 export interface ClassicResourceRegistrar {
   register(options: {
     readonly url: string | URL;
@@ -15,7 +27,12 @@ export interface ClassicResourceRegistrar {
     readonly contentId?: string;
     readonly mimeType?: string | null;
     readonly traceId?: string;
+    /** Same-course page used only for lazy resolution of a bare bbcswebdav xid/rid. */
+    readonly sourcePageUrl?: string | URL;
+    readonly resourceKey?: string;
   }): string | null;
+  snapshotCachedResources?(resourceIds: readonly string[]): readonly ClassicCachedResource[];
+  restoreCachedResources?(resources: readonly ClassicCachedResource[]): ReadonlyMap<string, string>;
 }
 
 export interface AssignmentDetailResult {

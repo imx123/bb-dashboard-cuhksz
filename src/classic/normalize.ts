@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ClassicApiError } from './api-errors.js';
+import { debugLog } from '../debug-log.js';
 import { rawId, rawRecord, rawString, RawAnnouncementSchema, RawCourseSchema, RawFileSchema } from './raw-schema.js';
 import {
   AnnouncementV2Schema,
@@ -25,6 +26,7 @@ import { deriveSubmissionSummary, TRUSTED_FEEDBACK } from './submissions.js';
 import { sanitizeRichBody, type RichTextOptions } from './rich-text.js';
 import type { ClassicResourceRegistrar } from './detail-reader.js';
 import { CLASSIC_API_ORIGIN } from './api-contract.js';
+import { fallbackBbcsWebDavSourcePage, findBbcsWebDavSourcePage, inspectBbcsWebDavSource, prepareBbcsWebDavImageContext, resolveBbcsWebDavImage, safeBbcsWebDavSourcePage } from './bbcswebdav.js';
 
 export interface NormalizationContext {
   readonly fetchedAt: string;
@@ -33,6 +35,8 @@ export interface NormalizationContext {
   readonly traceId?: string;
   readonly richText?: RichTextOptions;
   readonly resourceRegistry?: ClassicResourceRegistrar;
+  /** Per-announcement, uniquely matched full bbcswebdav image URLs. */
+  readonly bbcsWebDavImageUrls?: ReadonlyMap<string, string>;
   /** Live API orchestration opts into verified Classic page fallbacks. */
   readonly allowClassicFallback?: boolean;
 }
@@ -145,7 +149,7 @@ function courseSourceUrl(courseId: string): string {
 }
 
 function announcementSourceUrl(courseId: string): string {
-  return classicPage('/webapps/blackboard/execute/announcement', { course_id: courseId });
+  return classicPage('/webapps/blackboard/execute/announcement', { method: 'search', context: 'course_entry', course_id: courseId });
 }
 
 function contentSourceUrl(courseId: string, contentId: string): string {
@@ -188,15 +192,43 @@ function bodyText(value: unknown): string {
 }
 
 function richBody(value: unknown, context: NormalizationContext, baseUrl?: string, courseId?: string, contentId?: string) {
+  const pageUrl = courseId
+    ? findBbcsWebDavSourcePage(value, courseId, contentId) ?? (baseUrl ? safeBbcsWebDavSourcePage(baseUrl, courseId, contentId) : null) ?? fallbackBbcsWebDavSourcePage(courseId, contentId)
+    : null;
+  const imageContext = prepareBbcsWebDavImageContext(value, pageUrl ?? baseUrl);
+  const imageUrls = new Map(context.bbcsWebDavImageUrls ?? []);
+  for (const [key, url] of imageContext.imageUrls) if (!imageUrls.has(key)) imageUrls.set(key, url);
   try {
-    return sanitizeRichBody(value, {
+    const result = sanitizeRichBody(value, {
       ...context.richText,
       baseUrl: context.richText?.baseUrl ?? baseUrl,
       registerImage: (url, alt) => {
-        const resourceId = context.resourceRegistry?.register({ kind: 'image', url, courseId, contentId, traceId: context.traceId });
+        const inspected = inspectBbcsWebDavSource(url, pageUrl ?? baseUrl);
+        const resolvedUrl = resolveBbcsWebDavImage(url, imageUrls);
+        const sourcePage = inspected && !inspected.prefixed && pageUrl ? pageUrl.href : undefined;
+        const resourceId = context.resourceRegistry?.register({
+          kind: 'image',
+          url: resolvedUrl,
+          courseId,
+          contentId,
+          traceId: context.traceId,
+          ...(sourcePage && inspected ? { sourcePageUrl: sourcePage, resourceKey: inspected.key } : {}),
+        });
         return resourceId ? { resourceId, alt } : null;
       },
     });
+    if (imageContext.referenceCount > 0) debugLog.event('classic.resource.image-context', {
+      traceId: context.traceId,
+      courseId,
+      contentId,
+      sourceUrl: pageUrl?.href,
+      stage: 'structured-fields',
+      referenceCount: imageContext.referenceCount,
+      matchedCount: imageContext.matchedCount,
+      ambiguousCount: imageContext.ambiguousCount,
+      unresolvedCount: imageContext.unresolvedCount,
+    });
+    return result;
   } catch {
     return emptyRichBody(bodyText(value), false);
   }

@@ -4,7 +4,7 @@ import type { ClassicApiTransport, ClassicSession as ClassicSessionContract, Cla
 import { ClassicApiClient } from './api-client.js';
 import { createRequestBudget } from './pagination.js';
 import { readClassicSnapshot } from './api-snapshot.js';
-import { readAssignmentDetail, type AssignmentDetailResult, type ClassicResourceRegistrar } from './detail-reader.js';
+import { readAssignmentDetail, type AssignmentDetailResult, type ClassicCachedResource, type ClassicResourceRegistrar } from './detail-reader.js';
 import { ClassicSnapshotV2Cache, mergeSnapshotV2WithCache, type ClassicCacheIdentity } from './cache-v2.js';
 import { SnapshotV2Schema, type AssignmentV2, type SnapshotV2 } from './schema-v2.js';
 
@@ -48,6 +48,64 @@ function addCacheError(snapshot: SnapshotV2, error: unknown): SnapshotV2 {
     state: snapshot.state === 'ok' ? 'partial' : snapshot.state,
     errors: [...snapshot.errors, { scope: publicError.scope || 'cache', code: publicError.code, message: '本机缓存未能读取，已继续使用本次 API 结果。' }],
   });
+}
+
+function collectResourceIds(value: unknown, output = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) collectResourceIds(item, output);
+    return output;
+  }
+  if (!value || typeof value !== 'object') return output;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'resourceId' && typeof child === 'string') output.add(child);
+    else collectResourceIds(child, output);
+  }
+  return output;
+}
+
+const OPAQUE_RESOURCE_ID = /^[A-Za-z0-9._:-]{1,300}$/;
+const OPAQUE_RESOURCE_SRC = /((?:^|[\s<])src\s*=\s*)(["'])(lms-resource:\/\/resource\/)([A-Za-z0-9._:-]{1,300})(\2)/g;
+
+function remapOpaqueResourceHtml(value: string, mapping: ReadonlyMap<string, string>): { html: string; unresolved: boolean } {
+  let unresolved = false;
+  OPAQUE_RESOURCE_SRC.lastIndex = 0;
+  const html = value.replace(OPAQUE_RESOURCE_SRC, (whole, prefix: string, quote: string, scheme: string, oldResourceId: string) => {
+    const mappedResourceId = mapping.get(oldResourceId);
+    if (!mappedResourceId || !OPAQUE_RESOURCE_ID.test(mappedResourceId)) {
+      unresolved = true;
+      return whole;
+    }
+    return `${prefix}${quote}${scheme}${encodeURIComponent(mappedResourceId)}${quote}`;
+  });
+  return { html, unresolved };
+}
+
+function remapResourceIds<T>(value: T, mapping: ReadonlyMap<string, string>): T {
+  if (Array.isArray(value)) return value.map(item => remapResourceIds(item, mapping)) as T;
+  if (!value || typeof value !== 'object') return value;
+  const originalImages = Array.isArray((value as Record<string, unknown>).images) ? (value as Record<string, unknown>).images : undefined;
+  let opaqueHtmlUnresolved = false;
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'resourceId' && typeof child === 'string') output[key] = mapping.get(child) ?? child;
+    else if (key === 'sanitizedHtml' && typeof child === 'string') {
+      const remapped = remapOpaqueResourceHtml(child, mapping);
+      output[key] = remapped.html;
+      opaqueHtmlUnresolved ||= remapped.unresolved;
+    } else output[key] = remapResourceIds(child, mapping);
+  }
+  if (Array.isArray(originalImages) && typeof output.complete === 'boolean') {
+    const unresolved = originalImages.some(item => item && typeof item === 'object' && typeof (item as Record<string, unknown>).resourceId === 'string' && !mapping.has((item as Record<string, unknown>).resourceId as string));
+    if (unresolved || opaqueHtmlUnresolved) output.complete = false;
+  } else if (opaqueHtmlUnresolved && typeof output.complete === 'boolean') {
+    output.complete = false;
+  }
+  return output as T;
+}
+
+function cachedResourceContexts(registry: ClassicResourceRegistrar | undefined, snapshot: SnapshotV2): readonly ClassicCachedResource[] {
+  const ids = [...collectResourceIds(snapshot)];
+  return registry?.snapshotCachedResources?.(ids) ?? [];
 }
 
 /** New production provider boundary. It never imports or falls back to MCP. */
@@ -160,12 +218,24 @@ export class ClassicApiProvider {
     };
     let previous: SnapshotV2 | undefined;
     let cacheFailure: unknown;
-    try { previous = await this.cache.read(identity); } catch (error) { cacheFailure = error; }
+    try {
+      const cached = await this.cache.readWithResources(identity);
+      guard();
+      previous = cached?.snapshot;
+      if (previous && this.resourceRegistry?.restoreCachedResources) {
+        const remapped = this.resourceRegistry.restoreCachedResources(cached?.resources ?? []);
+        previous = remapResourceIds(previous, remapped);
+        guard();
+      }
+    } catch (error) {
+      if (error instanceof ClassicApiError && ['SESSION_EXPIRED', 'AUTH_REQUIRED', 'TIMEOUT'].includes(error.code)) throw error;
+      cacheFailure = error;
+    }
     const result = await readClassicSnapshot(this.api, { signal, traceId, budget, source: this.source, resourceRegistry: this.resourceRegistry });
     guard();
     let snapshot = previous ? mergeSnapshotV2WithCache(result.snapshot, previous) : result.snapshot;
     if (cacheFailure) snapshot = addCacheError(snapshot, cacheFailure);
-    try { await this.cache.write(identity, snapshot, guard); }
+    try { await this.cache.write(identity, snapshot, guard, cachedResourceContexts(this.resourceRegistry, snapshot)); }
     catch (error) {
       if (error instanceof ClassicApiError && ['SESSION_EXPIRED', 'AUTH_REQUIRED', 'TIMEOUT'].includes(error.code)) throw error;
       snapshot = addCacheError(snapshot, error);

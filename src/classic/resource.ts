@@ -3,6 +3,8 @@ import { debugLog } from '../debug-log.js';
 import { CLASSIC_API_ORIGIN, type ClassicApiTransport, type TraceId } from './api-contract.js';
 import { ClassicApiError } from './api-errors.js';
 import type { ClassicSession } from './session.js';
+import { extractBbcsWebDavImageSources, inspectBbcsWebDavSource, safeBbcsWebDavSourcePage } from './bbcswebdav.js';
+import type { ClassicCachedResource } from './detail-reader.js';
 
 export const CLASSIC_RESOURCE_SCHEME = 'lms-resource';
 const RESOURCE_HOST = 'resource';
@@ -12,6 +14,7 @@ const MAX_RESOURCE_BYTES = 24 * 1024 * 1024;
 // attachment budget bounded while allowing its known same-origin 302 chain:
 // three attempts (initial + two retries) times six hops (initial + five 302s).
 const RESOURCE_REQUEST_LIMIT = 18;
+const MAX_SOURCE_PAGE_CONTEXTS = 64;
 
 const SAFE_MEDIA_TYPES = new Set([
   'image/avif', 'image/bmp', 'image/gif', 'image/jpeg', 'image/png', 'image/webp',
@@ -19,14 +22,19 @@ const SAFE_MEDIA_TYPES = new Set([
   'text/plain', 'text/csv',
 ]);
 const SAFE_IMAGE_TYPES = new Set(['image/avif', 'image/bmp', 'image/gif', 'image/jpeg', 'image/png', 'image/webp']);
+const SENSITIVE_CACHE_QUERY = /(?:token|ticket|code|saml|relay|state|session|jsession|cookie|auth|password|secret|signature|assertion|credential|nonce|key|otp|mfa)/i;
+
+type SourcePageCandidates = Map<string, ReadonlySet<string>>;
 
 interface ResourceEntry {
   readonly resourceId: string;
-  readonly url: URL;
+  url: URL;
   readonly generation: number;
   readonly kind: 'image' | 'attachment';
   readonly courseId?: string;
   readonly contentId?: string;
+  readonly sourcePageUrl?: URL;
+  readonly resourceKey?: string;
   readonly mimeType: string | null;
   readonly maxBytes: number;
   readonly traceId?: TraceId;
@@ -41,6 +49,9 @@ export interface RegisterClassicResourceOptions {
   readonly mimeType?: string | null;
   readonly maxBytes?: number;
   readonly traceId?: TraceId;
+  /** Same-course page and exact xid/rid key for lazy prefix resolution. */
+  readonly sourcePageUrl?: string | URL;
+  readonly resourceKey?: string;
 }
 
 export interface ReadClassicResourceOptions {
@@ -68,6 +79,13 @@ function safeSourceUrl(value: string | URL): URL | null {
   }
 }
 
+function cacheableUrl(value: string | URL): string | null {
+  const url = safeSourceUrl(value);
+  if (!url) return null;
+  for (const [key] of url.searchParams) if (SENSITIVE_CACHE_QUERY.test(key)) return null;
+  return url.href;
+}
+
 function safeResourceId(value: string): boolean {
   return /^[a-f0-9-]{20,80}$/i.test(value);
 }
@@ -91,6 +109,7 @@ function contentType(value: string | null | undefined): string | null {
  */
 export class ClassicResourceRegistry {
   private readonly entries = new Map<string, ResourceEntry>();
+  private readonly sourcePageContexts = new Map<string, Promise<SourcePageCandidates>>();
 
   constructor(
     private readonly session: ClassicSession,
@@ -102,6 +121,13 @@ export class ClassicResourceRegistry {
     if (this.session.state !== 'authenticated' || !this.session.account || this.session.account.sessionGeneration !== this.session.generation) return null;
     const url = safeSourceUrl(options.url);
     if (!url) return null;
+    const inspected = options.kind === 'image' ? inspectBbcsWebDavSource(url) : null;
+    const sourcePageUrl = options.sourcePageUrl && options.courseId
+      ? safeBbcsWebDavSourcePage(options.sourcePageUrl, options.courseId, options.contentId)
+      : null;
+    const resourceKey = inspected && !inspected.prefixed && sourcePageUrl && typeof options.resourceKey === 'string' && options.resourceKey.toLowerCase() === inspected.key
+      ? inspected.key
+      : undefined;
     const registeredMime = contentType(options.mimeType);
     const resourceId = randomUUID();
     const entry: ResourceEntry = {
@@ -113,6 +139,7 @@ export class ClassicResourceRegistry {
       kind: options.kind ?? (registeredMime?.startsWith('image/') || (!options.courseId && !options.contentId) ? 'image' : 'attachment'),
       ...(options.courseId ? { courseId: options.courseId } : {}),
       ...(options.contentId ? { contentId: options.contentId } : {}),
+      ...(sourcePageUrl && resourceKey ? { sourcePageUrl, resourceKey } : {}),
       mimeType: registeredMime,
       maxBytes: boundedBytes(options.maxBytes),
       ...(options.traceId ? { traceId: options.traceId } : {}),
@@ -123,11 +150,14 @@ export class ClassicResourceRegistry {
 
   clear(): void {
     this.entries.clear();
+    this.sourcePageContexts.clear();
   }
 
   clearStale(): void {
     const generation = this.session.generation;
     for (const [resourceId, entry] of this.entries) if (entry.generation !== generation) this.entries.delete(resourceId);
+    const prefix = `${generation}:`;
+    for (const key of this.sourcePageContexts.keys()) if (!key.startsWith(prefix)) this.sourcePageContexts.delete(key);
   }
 
   resourceUrl(resourceId: string): string | null {
@@ -135,6 +165,201 @@ export class ClassicResourceRegistry {
     const entry = this.entries.get(resourceId);
     if (!safeResourceId(resourceId) || !entry || entry.kind !== 'image') return null;
     return `${CLASSIC_RESOURCE_SCHEME}://${RESOURCE_HOST}/${encodeURIComponent(resourceId)}`;
+  }
+
+  snapshotCachedResources(resourceIds: readonly string[]): readonly ClassicCachedResource[] {
+    this.clearStale();
+    const output: ClassicCachedResource[] = [];
+    const seen = new Set<string>();
+    for (const resourceId of resourceIds) {
+      if (seen.has(resourceId)) continue;
+      seen.add(resourceId);
+      const entry = this.entries.get(resourceId);
+      const url = entry ? cacheableUrl(entry.url) : null;
+      if (!entry || !safeResourceId(resourceId) || !url) continue;
+      const sourcePageUrl = entry.sourcePageUrl ? cacheableUrl(entry.sourcePageUrl) : null;
+      output.push({
+        resourceId,
+        url,
+        kind: entry.kind,
+        ...(entry.courseId ? { courseId: entry.courseId } : {}),
+        ...(entry.contentId ? { contentId: entry.contentId } : {}),
+        ...(sourcePageUrl && entry.resourceKey ? { sourcePageUrl, resourceKey: entry.resourceKey } : {}),
+        mimeType: entry.mimeType,
+        maxBytes: entry.maxBytes,
+      });
+    }
+    return output;
+  }
+
+  restoreCachedResources(resources: readonly ClassicCachedResource[]): ReadonlyMap<string, string> {
+    this.clearStale();
+    const remapped = new Map<string, string>();
+    let skipped = 0;
+    for (const resource of resources.slice(0, 2_000)) {
+      if (!safeResourceId(resource.resourceId) || !cacheableUrl(resource.url)) { skipped += 1; continue; }
+      const resourceId = this.register({
+        url: resource.url,
+        kind: resource.kind,
+        ...(resource.courseId ? { courseId: resource.courseId } : {}),
+        ...(resource.contentId ? { contentId: resource.contentId } : {}),
+        ...(resource.sourcePageUrl ? { sourcePageUrl: resource.sourcePageUrl } : {}),
+        ...(resource.resourceKey ? { resourceKey: resource.resourceKey } : {}),
+        mimeType: resource.mimeType,
+        maxBytes: resource.maxBytes,
+      });
+      if (resourceId) remapped.set(resource.resourceId, resourceId);
+      else skipped += 1;
+    }
+    debugLog.event('classic.resource.cache-restore', { restoredCount: remapped.size, skippedCount: skipped, inputCount: Math.min(resources.length, 2_000) });
+    return remapped;
+  }
+
+  private async sourcePageCandidates(entry: ResourceEntry, budget: { readonly signal: AbortSignal; readonly deadlineAt: number; readonly requestLimit: number; readonly responseBytesLimit: number }, traceId: TraceId | undefined): Promise<SourcePageCandidates> {
+    if (!entry.sourcePageUrl) return new Map();
+    this.clearStale();
+    const cacheKey = `${entry.generation}:${entry.sourcePageUrl.href}`;
+    const existing = this.sourcePageContexts.get(cacheKey);
+    if (existing) return existing;
+    const pending = (async (): Promise<SourcePageCandidates> => {
+      debugLog.event('classic.resource.image-context', {
+        traceId,
+        courseId: entry.courseId,
+        contentId: entry.contentId,
+        sourceUrl: entry.sourcePageUrl!.href,
+        stage: 'source-page.fetch',
+        referenceCount: 1,
+        matchedCount: 0,
+      });
+      let response: Awaited<ReturnType<ClassicApiTransport['request']>>;
+      try {
+        response = await this.transport.request<string>({
+          method: 'GET',
+          url: entry.sourcePageUrl!,
+          resource: 'source-page',
+          ...(entry.courseId ? { courseId: entry.courseId } : {}),
+          ...(traceId ? { traceId } : {}),
+          budget,
+        });
+      } catch (error) {
+        debugLog.error('classic.resource.image-context', error, {
+          traceId,
+          courseId: entry.courseId,
+          contentId: entry.contentId,
+          sourceUrl: entry.sourcePageUrl!.href,
+          stage: 'source-page.error',
+          referenceCount: 1,
+          matchedCount: 0,
+        });
+        throw error;
+      }
+      const contentTypeHeader = response.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase();
+      if (contentTypeHeader && contentTypeHeader !== 'text/html' && contentTypeHeader !== 'application/xhtml+xml') {
+        debugLog.event('classic.resource.image-context', {
+          traceId,
+          courseId: entry.courseId,
+          contentId: entry.contentId,
+          sourceUrl: entry.sourcePageUrl!.href,
+          stage: 'source-page.error',
+          referenceCount: 1,
+          matchedCount: 0,
+          errorCode: 'SOURCE_PAGE_CONTENT_TYPE',
+        });
+        throw new ClassicApiError('RESOURCE_FAILED', 'Classic 公告来源页不是受支持的 HTML 文档。', { scope: 'classic.resource.image-context', status: 415, retryable: false });
+      }
+      if (typeof response.data !== 'string') {
+        debugLog.event('classic.resource.image-context', {
+          traceId,
+          courseId: entry.courseId,
+          contentId: entry.contentId,
+          sourceUrl: entry.sourcePageUrl!.href,
+          stage: 'source-page.error',
+          referenceCount: 1,
+          matchedCount: 0,
+          errorCode: 'SOURCE_PAGE_NOT_TEXT',
+        });
+        throw new ClassicApiError('RESOURCE_FAILED', 'Classic 公告来源页没有可解析的 HTML 文本。', { scope: 'classic.resource.image-context', status: 502, retryable: false });
+      }
+      const candidates: SourcePageCandidates = new Map();
+      for (const source of extractBbcsWebDavImageSources(response.data, entry.sourcePageUrl!)) {
+        if (!source.prefixed) continue;
+        const urls = new Set(candidates.get(source.key) ?? []);
+        urls.add(source.url);
+        candidates.set(source.key, urls);
+      }
+      debugLog.event('classic.resource.image-context', {
+        traceId,
+        courseId: entry.courseId,
+        contentId: entry.contentId,
+        sourceUrl: entry.sourcePageUrl!.href,
+        stage: 'source-page.match',
+        referenceCount: 1,
+        candidateCount: [...candidates.values()].reduce((count, urls) => count + urls.size, 0),
+        matchedCount: candidates.get(entry.resourceKey ?? '')?.size ?? 0,
+      });
+      return candidates;
+    })();
+    this.sourcePageContexts.set(cacheKey, pending);
+    while (this.sourcePageContexts.size > MAX_SOURCE_PAGE_CONTEXTS) {
+      const oldest = this.sourcePageContexts.keys().next().value;
+      if (oldest === undefined || oldest === cacheKey) break;
+      this.sourcePageContexts.delete(oldest);
+    }
+    pending.catch(() => {
+      if (this.sourcePageContexts.get(cacheKey) === pending) this.sourcePageContexts.delete(cacheKey);
+    });
+    return pending;
+  }
+
+  private async resolveEntryUrl(entry: ResourceEntry, budget: { readonly signal: AbortSignal; readonly deadlineAt: number; readonly requestLimit: number; readonly responseBytesLimit: number }, traceId: TraceId | undefined): Promise<URL> {
+    if (entry.kind !== 'image') return entry.url;
+    const inspected = inspectBbcsWebDavSource(entry.url);
+    if (!inspected || inspected.prefixed) return entry.url;
+    if (!entry.sourcePageUrl || !entry.resourceKey) {
+      debugLog.event('classic.resource.image-context', {
+        traceId,
+        courseId: entry.courseId,
+        contentId: entry.contentId,
+        sourceUrl: entry.url.href,
+        stage: 'unresolved',
+        referenceCount: 1,
+        matchedCount: 0,
+        candidateCount: 0,
+        errorCode: 'IMAGE_CONTEXT_MISSING_SOURCE',
+      });
+      throw new ClassicApiError('RESOURCE_FAILED', 'Classic 图片缺少可验证的公告来源上下文。', { scope: 'classic.resource.image-context', status: 422, retryable: false });
+    }
+    const candidates = await this.sourcePageCandidates(entry, budget, traceId);
+    const matches = candidates.get(entry.resourceKey) ?? new Set<string>();
+    if (matches.size !== 1) {
+      debugLog.event('classic.resource.image-context', {
+        traceId,
+        courseId: entry.courseId,
+        contentId: entry.contentId,
+        sourceUrl: entry.sourcePageUrl.href,
+        targetUrl: entry.url.href,
+        stage: matches.size > 1 ? 'ambiguous' : 'unresolved',
+        referenceCount: 1,
+        candidateCount: matches.size,
+        matchedCount: 0,
+        ...(matches.size > 1 ? { errorCode: 'IMAGE_CONTEXT_AMBIGUOUS' } : { errorCode: 'IMAGE_CONTEXT_UNRESOLVED' }),
+      });
+      throw new ClassicApiError('RESOURCE_FAILED', matches.size > 1 ? 'Classic 图片来源上下文不唯一。' : 'Classic 图片来源页没有匹配的资源上下文。', { scope: 'classic.resource.image-context', status: 422, retryable: false });
+    }
+    const resolved = new URL([...matches][0]!);
+    entry.url = resolved;
+    debugLog.event('classic.resource.image-context', {
+      traceId,
+      courseId: entry.courseId,
+      contentId: entry.contentId,
+      sourceUrl: entry.sourcePageUrl.href,
+      targetUrl: resolved.href,
+      stage: 'resolved',
+      referenceCount: 1,
+      candidateCount: 1,
+      matchedCount: 1,
+    });
+    return resolved;
   }
 
   /**
@@ -169,18 +394,20 @@ export class ClassicResourceRegistry {
       if (entry.generation !== this.session.generation || this.session.state !== 'authenticated' || this.session.account?.sessionGeneration !== this.session.generation) {
         throw new ClassicApiError('AUTH_REQUIRED', 'Classic resource 会话已失效。', { scope: 'classic.resource', retryable: false });
       }
+      const budget = {
+        signal: controller.signal,
+        deadlineAt: Date.now() + 15_000,
+        requestLimit: RESOURCE_REQUEST_LIMIT,
+        responseBytesLimit: entry.maxBytes,
+      };
+      const url = await this.resolveEntryUrl(entry, budget, traceId);
       const response = await this.transport.request<Uint8Array>({
         method,
-        url: entry.url,
+        url,
         resource: 'attachments',
         ...(entry.courseId ? { courseId: entry.courseId } : {}),
         ...(traceId ? { traceId } : {}),
-        budget: {
-          signal: controller.signal,
-          deadlineAt: Date.now() + 15_000,
-          requestLimit: RESOURCE_REQUEST_LIMIT,
-          responseBytesLimit: entry.maxBytes,
-        },
+        budget,
       });
       if (entry.generation !== this.session.generation) throw new ClassicApiError('AUTH_REQUIRED', 'Classic resource 会话已改变。', { scope: 'classic.resource', retryable: false });
       const body = response.data instanceof Uint8Array ? response.data : null;

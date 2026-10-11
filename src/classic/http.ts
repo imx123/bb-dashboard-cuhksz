@@ -11,12 +11,14 @@ import type {
   ClassicSession as ClassicSessionContract,
 } from './api-contract.js';
 import type { ClassicSession } from './session.js';
+import { restoreBbcsWebDavPrefix } from './bbcswebdav.js';
 
 const MAX_REDIRECTS = 5;
 const MAX_RETRIES = 2;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MIN_INTERVAL_MS = 150;
 const MAX_CONCURRENT = 3;
+const SOURCE_PAGE_MAX_BYTES = 1_000_000;
 const LOGIN_PATH = /\/(?:webapps\/login|auth-saml\/saml\/login|adfs\/ls|login\.jsp|oidcAuth)(?:\/|$)/i;
 const AUTH_REDIRECT_PATH = /\/(?:webapps\/login|auth-saml|adfs\/ls|login(?:\.jsp)?|oidc|oauth|saml)(?:[/?#]|$)/i;
 const SENSITIVE_HEADER = /^(?:set-cookie|cookie|authorization|proxy-authorization|x-.*token|x-.*auth)$/i;
@@ -252,6 +254,10 @@ function decodeBody(body: Uint8Array, contentType: string | null, request: Class
     try { return JSON.parse(new TextDecoder().decode(body)) as unknown; }
     catch { throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard JSON 响应无法解析。', { scope: `api:${request.resource}`, retryable: false }); }
   }
+  // A source page is an explicitly bounded HTML transport. Decode it here
+  // even when Blackboard omits Content-Type; the caller still rejects a
+  // declared non-HTML type before parsing the text.
+  if (request.resource === 'source-page') return new TextDecoder().decode(body);
   if (request.resource === 'attachments' && (/^(?:image|audio|video)\//i.test(type) || /^application\/(?:pdf|octet-stream|zip)$/i.test(type))) return body;
   if (type.startsWith('text/')) return new TextDecoder().decode(body);
   return body;
@@ -328,7 +334,7 @@ export class ClassicHttpClient implements ClassicApiTransport {
             method: request.method,
             redirect: 'manual',
             headers: {
-              Accept: 'application/json, text/plain, image/*, application/octet-stream',
+              Accept: 'application/json, text/html, text/plain, image/*, application/octet-stream',
               'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8',
               ...(cookieHeader ? { Cookie: cookieHeader } : {}),
             },
@@ -355,6 +361,9 @@ export class ClassicHttpClient implements ClassicApiTransport {
             await discardResponse(response);
             throw new ClassicApiError('URL_REJECTED', 'Blackboard 重定向目标无效。', { scope: `api:${request.resource}`, retryable: false });
           }
+          const restored = request.resource === 'attachments' ? restoreBbcsWebDavPrefix(initial, next) : next;
+          const contextRestored = restored.href !== next.href;
+          next = restored;
           if (next.username || next.password || next.port || next.hash || next.protocol !== 'https:') {
             await discardResponse(response);
             throw new ClassicApiError('URL_REJECTED', 'Blackboard 重定向目标不符合 HTTPS URL 边界。', { scope: `api:${request.resource}`, status: response.status, retryable: false });
@@ -380,7 +389,7 @@ export class ClassicHttpClient implements ClassicApiTransport {
             throw new ClassicApiError('RESOURCE_FAILED', 'Blackboard 重定向次数超过限制。', { scope: `api:${request.resource}`, retryable: false });
           }
           ensureGeneration(session, generation, request.resource);
-          debugLog.event('classic.api.http.redirect', { traceId: request.traceId, resource: request.resource, targetUrl: initial.href, fromUrl: current.href, toUrl: next.href, status: response.status, redirect: redirects, attempt, courseId: request.courseId });
+          debugLog.event('classic.api.http.redirect', { traceId: request.traceId, resource: request.resource, targetUrl: initial.href, fromUrl: current.href, toUrl: next.href, status: response.status, redirect: redirects, attempt, courseId: request.courseId, ...(contextRestored ? { contextRestored: true } : {}) });
           current = next;
           continue;
         }
@@ -415,7 +424,10 @@ export class ClassicHttpClient implements ClassicApiTransport {
         }
         let body: Uint8Array;
         try {
-          body = await readBody(response, controller, request.budget.responseBytesLimit, signal, `api:${request.resource}`, () => ensureGeneration(session, generation, request.resource));
+          const responseBytesLimit = request.resource === 'source-page'
+            ? Math.min(request.budget.responseBytesLimit, SOURCE_PAGE_MAX_BYTES)
+            : request.budget.responseBytesLimit;
+          body = await readBody(response, controller, responseBytesLimit, signal, `api:${request.resource}`, () => ensureGeneration(session, generation, request.resource));
         } catch (error) {
           if (error instanceof ClassicApiError) throw error;
           ensureGeneration(session, generation, request.resource);
