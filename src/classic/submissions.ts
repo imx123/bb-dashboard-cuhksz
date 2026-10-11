@@ -2,6 +2,9 @@ import { ClassicApiError } from './api-errors.js';
 import { emptyRichBody, emptySubmissionSummary, RichBodySchema, SubmissionSummarySchema, type RichBody, type SubmissionSummary } from './schema-v2.js';
 import { rawRecord, rawString } from './raw-schema.js';
 
+/** Module-private provenance marker; a raw API field cannot forge this value. */
+export const TRUSTED_FEEDBACK = Symbol('classic.submission.feedback.sanitized');
+
 export interface SubmissionEvidenceInput {
   readonly status?: unknown;
   readonly attemptStatus?: unknown;
@@ -13,7 +16,12 @@ export interface SubmissionEvidenceInput {
   readonly history?: readonly unknown[];
   readonly late?: unknown;
   readonly gradeDisplay?: unknown;
+  readonly displayGrade?: unknown;
   readonly feedback?: unknown;
+  readonly feedbackToUser?: unknown;
+  /** Legacy compatibility field; it is deliberately ignored for trust. */
+  readonly feedbackSanitized?: boolean;
+  readonly [TRUSTED_FEEDBACK]?: true;
   readonly attemptReceipt?: unknown;
   readonly attempt?: unknown;
   readonly lastAttempt?: unknown;
@@ -24,7 +32,15 @@ export interface SubmissionDerivationOptions {
   readonly verifiedExplicitNone?: boolean;
 }
 
-const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+export interface SubmissionScopeExpectation {
+  readonly courseId: string;
+  readonly userId?: string;
+  readonly columnId?: string | null;
+  readonly contentId?: string | null;
+  readonly gradeId?: string | null;
+}
+
+const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 function validCalendarDate(yearText: string, monthText: string, dayText: string): boolean {
   const year = Number(yearText); const month = Number(monthText); const day = Number(dayText);
@@ -36,7 +52,7 @@ function dateValue(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === '') return null;
   const text = typeof value === 'string' ? value.trim() : '';
   const match = DATE_TIME_PATTERN.exec(text);
-  if (!match || !validCalendarDate(match[1], match[2], match[3]) || !Number.isFinite(Date.parse(text))) {
+  if (!match || !validCalendarDate(match[1]!, match[2]!, match[3]!) || !Number.isFinite(Date.parse(text))) {
     throw new ClassicApiError('API_SCHEMA_CHANGED', `Blackboard 提交字段 ${field} 无法解释。`, { scope: 'submission' });
   }
   return text;
@@ -51,6 +67,57 @@ function statusValue(value: unknown): string {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
 }
 
+function displayGradeText(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  const item = rawRecord(value);
+  if (!item) return null;
+  return displayGradeText(item.score ?? item.value ?? item.displayValue ?? item.text);
+}
+
+/** Reject a submission/grade record that explicitly belongs to another scope. */
+export function assertSubmissionScope(value: unknown, expected: SubmissionScopeExpectation): void {
+  const root = rawRecord(value);
+  if (!root) return;
+  const allowedGradables = new Set([expected.columnId, expected.contentId].filter((item): item is string => !!item));
+  const check = (item: Record<string, unknown>, scope: string): void => {
+    const courseId = rawString(item.courseId);
+    if (courseId && courseId !== expected.courseId) throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交记录课程归属不一致。', { scope });
+    if (expected.userId) {
+      const nestedUser = rawRecord(item.user);
+      const userId = rawString(item.userId ?? nestedUser?.id ?? item.studentId);
+      if (userId && userId !== expected.userId) throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交记录账号归属不一致。', { scope });
+    }
+    if (expected.columnId) {
+      const nestedColumn = rawRecord(item.column);
+      const columnId = rawString(item.columnId ?? nestedColumn?.columnId ?? nestedColumn?.id);
+      if (columnId && columnId !== expected.columnId) throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交记录评分列归属不一致。', { scope });
+    }
+    if (expected.gradeId) {
+      const gradeId = rawString(item.gradeId);
+      if (gradeId && gradeId !== expected.gradeId) throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交记录成绩归属不一致。', { scope });
+    }
+    const gradableId = rawString(item.gradableItemId ?? item.contentId);
+    if (gradableId && allowedGradables.size > 0 && !allowedGradables.has(gradableId)) {
+      throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交记录作业归属不一致。', { scope });
+    }
+    const nestedReceipt = rawRecord(item.attemptReceipt);
+    if (nestedReceipt) check(nestedReceipt, `${scope}.attemptReceipt`);
+  };
+  check(root, 'submission.scope');
+  for (const [key, nested] of [['attempt', root.attempt], ['lastAttempt', root.lastAttempt], ['attemptReceipt', root.attemptReceipt]] as const) {
+    const item = rawRecord(nested);
+    if (item) check(item, `submission.scope.${key}`);
+  }
+  const attempt = rawRecord(root.lastAttempt ?? root.attempt);
+  const attemptId = attempt ? rawString(attempt.id ?? attempt.attemptId) : null;
+  const receipt = rawRecord(attempt?.attemptReceipt ?? root.attemptReceipt);
+  const receiptAttemptId = rawString(receipt?.attemptId);
+  if (attemptId && receiptAttemptId && attemptId !== receiptAttemptId) {
+    throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 提交回执与 attempt 归属不一致。', { scope: 'submission.scope.attemptReceipt' });
+  }
+}
+
 function attemptState(status: string): SubmissionSummary['latestAttemptState'] {
   // These are the only status values verified for CUHK(SZ) Classic. Every
   // other raw label stays unknown until the school mapping is confirmed.
@@ -60,11 +127,16 @@ function attemptState(status: string): SubmissionSummary['latestAttemptState'] {
   return 'unknown';
 }
 
-function validRichBody(value: unknown): RichBody | null {
+function validRichBody(value: unknown, trusted: boolean): RichBody | null {
   const parsed = RichBodySchema.safeParse(value);
-  // No rich-text parser is wired into M0. Even a raw object that happens to
-  // contain `complete: true` is not trusted as a complete school response.
-  return parsed.success ? { ...parsed.data, complete: false } : null;
+  // Raw API objects may contain a forged/ambiguous `complete` flag. Only the
+  // normalizer's parser marker may preserve the parser's completeness result.
+  if (!parsed.success) return null;
+  if (trusted) return { ...parsed.data, complete: parsed.data.complete };
+  // A renderer-facing sanitizedHtml/images/links object is never accepted
+  // directly from the API. Preserve only its bounded plain text until the
+  // mature parser has produced a trusted marker.
+  return { text: parsed.data.text, sanitizedHtml: null, images: [], links: [], complete: false };
 }
 
 interface HistoricalSubmission {
@@ -91,28 +163,37 @@ function receiptEvidence(value: unknown): Omit<HistoricalSubmission, 'attemptId'
 }
 
 function historyHasSubmitted(history: readonly unknown[] | undefined): HistoricalSubmission | null {
+  let receiptEvidenceValue: HistoricalSubmission | null = null;
   let statusEvidence: HistoricalSubmission | null = null;
   for (const entry of history ?? []) {
     const item = rawRecord(entry);
     if (!item) continue;
     const status = statusValue(item.status ?? item.attemptStatus);
-    const receiptValue = item.attemptReceipt;
+    const nestedAttempt = rawRecord(item.lastAttempt ?? item.attempt);
+    const receiptValue = item.attemptReceipt ?? nestedAttempt?.attemptReceipt;
     const receipt = receiptEvidence(receiptValue);
     if (receipt.valid) {
       const receiptObject = rawRecord(receiptValue);
-      return {
-        attemptId: idValue(item.id ?? item.attemptId ?? receiptObject?.attemptId),
+      const candidate: HistoricalSubmission = {
+        // Prefer the receipt's own attempt binding. A history wrapper may
+        // carry a grade-row id that is unrelated to the attempt being proven.
+        attemptId: idValue(receiptObject?.attemptId ?? nestedAttempt?.id ?? nestedAttempt?.attemptId ?? item.attemptId ?? item.id),
         receiptId: receipt.receiptId,
         submittedAt: receipt.submittedAt,
         submissionTotalSize: receipt.submissionTotalSize,
         evidence: 'receipt',
       };
+      if (!receiptEvidenceValue ||
+          (candidate.submittedAt && (!receiptEvidenceValue.submittedAt || Date.parse(candidate.submittedAt) >= Date.parse(receiptEvidenceValue.submittedAt))) ||
+          (!candidate.submittedAt && !receiptEvidenceValue.submittedAt)) {
+        receiptEvidenceValue = candidate;
+      }
     }
     if (['NEEDS_GRADING', 'COMPLETED'].includes(status)) {
-      statusEvidence ??= { attemptId: idValue(item.id ?? item.attemptId), receiptId: null, submittedAt: null, submissionTotalSize: null, evidence: 'attempt-status' };
+      statusEvidence ??= { attemptId: idValue(nestedAttempt?.id ?? nestedAttempt?.attemptId ?? item.attemptId ?? item.id), receiptId: null, submittedAt: null, submissionTotalSize: null, evidence: 'attempt-status' };
     }
   }
-  return statusEvidence;
+  return receiptEvidenceValue ?? statusEvidence;
 }
 
 /**
@@ -155,11 +236,12 @@ export function deriveSubmissionSummary(input: SubmissionEvidenceInput | unknown
   // on its own; it must not affect remoteSubmission or confirmation IDs.
   const submissionTotalSize = confirmedReceipt?.submissionTotalSize ?? receiptMetadata.submissionTotalSize ?? null;
   const receiptObject = rawRecord(receiptValue);
-  const latestAttemptId = idValue(value.latestAttemptId ?? value.attemptId ?? attempt?.id ?? attempt?.attemptId ?? receiptObject?.attemptId);
+  const latestAttemptId = idValue(value.latestAttemptId ?? attempt?.id ?? attempt?.attemptId ?? receiptObject?.attemptId);
   const receiptAttemptId = idValue(receiptObject?.attemptId);
   const confirmedSubmittedAttemptId = hasReceipt
-    ? receiptAttemptId ?? latestAttemptId
+    ? receiptAttemptId
     : receiptHistory?.attemptId ?? (['NEEDS_GRADING', 'COMPLETED'].includes(status) ? latestAttemptId : historySubmitted?.attemptId ?? null);
+  const feedbackValue = value.feedback ?? value.feedbackToUser ?? attempt?.feedbackToUser;
 
   let remoteSubmission: SubmissionSummary['remoteSubmission'] = 'unknown';
   let evidence: SubmissionSummary['evidence'] = 'unknown';
@@ -188,8 +270,37 @@ export function deriveSubmissionSummary(input: SubmissionEvidenceInput | unknown
     historyComplete,
     evidence,
     late: typeof value.late === 'boolean' ? value.late : null,
-    gradeDisplay: typeof value.gradeDisplay === 'string' ? value.gradeDisplay : null,
-    feedback: validRichBody(value.feedback) ?? (typeof value.feedback === 'string' ? emptyRichBody(value.feedback, false) : null),
+    gradeDisplay: displayGradeText(value.gradeDisplay ?? value.displayGrade ?? attempt?.displayGrade),
+    feedback: validRichBody(feedbackValue, value[TRUSTED_FEEDBACK] === true) ?? (typeof feedbackValue === 'string' ? emptyRichBody(feedbackValue, false) : null),
   } satisfies SubmissionSummary;
   return SubmissionSummarySchema.parse(output);
+}
+
+function evidenceRank(summary: SubmissionSummary): number {
+  if (summary.evidence === 'receipt') return 3;
+  if (summary.evidence === 'attempt-status') return 2;
+  if (summary.evidence === 'explicit-none') return 1;
+  return 0;
+}
+
+/** Merge one-to-many grade-column evidence without letting unknown overwrite proof. */
+export function mergeSubmissionSummaries(left: SubmissionSummary, right: SubmissionSummary): { summary: SubmissionSummary; conflict: boolean } {
+  const leftRank = evidenceRank(left);
+  const rightRank = evidenceRank(right);
+  const submittedConflict = left.remoteSubmission === 'submitted' && right.remoteSubmission === 'submitted' && (
+    (!!left.submittedAt && !!right.submittedAt && left.submittedAt !== right.submittedAt) ||
+    (!!left.receiptId && !!right.receiptId && left.receiptId !== right.receiptId)
+  );
+  const selected = rightRank > leftRank ? right : left;
+  const secondary = selected === right ? left : right;
+  const merged = SubmissionSummarySchema.parse({
+    ...selected,
+    latestAttemptId: selected.latestAttemptId ?? secondary.latestAttemptId,
+    confirmedSubmittedAttemptId: selected.confirmedSubmittedAttemptId ?? secondary.confirmedSubmittedAttemptId,
+    attemptCount: selected.attemptCount ?? secondary.attemptCount,
+    historyComplete: selected.historyComplete && secondary.historyComplete,
+    gradeDisplay: selected.gradeDisplay ?? secondary.gradeDisplay,
+    feedback: selected.feedback ?? secondary.feedback,
+  });
+  return { summary: merged, conflict: submittedConflict };
 }

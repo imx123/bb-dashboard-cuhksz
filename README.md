@@ -2,20 +2,20 @@
 
 > **Test environment (2026-10-10):** Windows build reported by `cmd /c ver` as `10.0.26300.9550`, AMD64; bundled Node `24.19.0`, npm `11.19.1`, bundled Python `3.12.14`, Electron `44.4.3`, and Playwright Chromium `153.0.8010.12`. The WMI/CIM edition caption was unavailable in the restricted test host, so no edition name is inferred here.
 >
-> **Current status:** the owner has completed the current runtime/session code changes and the current `npm.cmd run build` completed PASS. Final static review found no new business blocker. This round did not run tests, typecheck, the application, a browser probe or a real school login. The Python 21/21, Classic TypeScript 18/18, completion 5/5, stdio 8-tool, typecheck and no-flags Electron live/mock results are historical records from before these changes; they do not verify the current code. Current runtime and user-test status: `USER TEST PENDING / UNTESTED`. Real school authentication, real course comparison, and a Windows installer remain BLOCKED. See [delivery status](docs/DELIVERY.md) for the pending verification scope and historical evidence.
+> **Current status:** the JSON API rebuild is being integrated on top of the M0 contract. M0 is committed; the latest M1–M5 `npm.cmd run build` completed with exit 0. This round does not run tests, typecheck, the application, a browser probe or a real school login. Earlier Python/sidecar, Classic TypeScript, completion, typecheck and Electron harness results are historical and do not verify the rebuilt route. Current runtime and user-test status: `USER TEST PENDING / UNTESTED`. Real school authentication, real course comparison, and a Windows installer remain BLOCKED. See [delivery status](docs/DELIVERY.md) and the [M5 delivery note](docs/CLASSIC_API_M5_DELIVERY.md).
 
 [中文说明](README.zh-CN.md)
 
-This repository is a local, read-only development preview for CUHK Shenzhen's Blackboard Classic portal. It combines the Dashboard source from [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) with the isolated Python sidecar from [bb-mcp](https://github.com/changshenhan/bb-mcp). The current upstream source heads, import paths, and license records are in [M0 baseline](docs/M0-baseline.md).
+This repository is a local, read-only development preview for CUHK Shenzhen's Blackboard Classic portal. The rebuilt CUHK(SZ) path is a typed, fixed-origin JSON API reader under `src/classic/`, with an Electron-owned session and main-process resource boundary. The inherited Dashboard source from [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) and the isolated Python [bb-mcp](https://github.com/changshenhan/bb-mcp) sidecar remain in the tree for historical/public MCP compatibility; the new Classic route does not silently fall back to them. The current upstream source heads, import paths, and license records are in [M0 baseline](docs/M0-baseline.md).
 
 The Dashboard shows courses, announcements, assignments and course-file links. The connector does not submit work, upload files, or download courseware. Login and MFA happen only in a visible official Blackboard page controlled by the local user. This project is independent of CUHK, Blackboard, Anthology and the upstream projects.
 
 ## What is verified
 
-- Previous fixture runs covered bounded, typed Classic snapshots, the Python stdio MCP sidecar, the Node provider and the real Electron main-process IPC path; those runs are historical until the current runtime is tested again.
-- The owner ran `npm.cmd run build` after the current changes and it completed PASS. Typecheck and all test counts below remain historical records.
+- M0 schemas and synthetic API fixtures are source-level artifacts. The rebuilt reader keeps bounded pagination, account/generation checks, typed submission evidence, explicit calendar association, protected cache scope and visible partial coverage; these rules are awaiting the final build and user runtime check.
+- Earlier fixture, sidecar, Electron and typecheck results are historical records. The latest build exited 0; no current runtime result is claimed.
 
-The offline fixture and login harness evidence are historical records from before the current runtime/session fixes. The current code now retains a user-owned Playwright context after `complete`, reuses the live authorization context for course reads, scopes per-course `AUTH_REQUIRED` results, preserves partial data across bounded snapshot timeouts, and uses same-origin iframe/read-budget handling. This round did not run those paths; runtime and user-test status remains `USER TEST PENDING / UNTESTED`. Browser startup and an `AUTH_REQUIRED` result do not authenticate a school account. The real school and installer boundaries remain in [the delivery status](docs/DELIVERY.md).
+The offline fixture and login harness evidence belong to the former sidecar/provider route. The rebuilt path uses the manually initiated Electron session, a single bounded JSON snapshot budget, fixed-origin GET/HEAD transport, protected account-scoped cache and opaque main-process resources. This round did not run those paths; runtime and user-test status remains `USER TEST PENDING / UNTESTED`. A visible login window or an `AUTH_REQUIRED` result does not authenticate a school account. The real school and installer boundaries remain in [the delivery status](docs/DELIVERY.md).
 
 ## Windows development setup
 
@@ -27,7 +27,9 @@ node node_modules/electron/install.js
 npm.cmd run build
 ```
 
-Create the sidecar environment with an independent Python 3.10+ installation. Do not use a system Python 3.14 installation. Verify the interpreter before installing packages. In a Windows CMD window, set the browser path for that window only before installing Playwright:
+The rebuilt Classic JSON API route needs the Node/Electron dependencies above. Its session is created by the visible manual login action and does not copy or auto-migrate the former Playwright profile. The Python instructions below are only for the retained historical sidecar/MCP path; they are not required by the rebuilt Classic reader.
+
+For the historical sidecar, create an independent Python 3.10+ environment. Do not use a system Python 3.14 installation. Verify the interpreter before installing packages. In a Windows CMD window, set the browser path for that window only before installing Playwright:
 
 ```bat
 py -3.12 -m venv sidecar\bb-mcp\.venv
@@ -53,7 +55,7 @@ The fixture-only demonstration is safe to run without an account:
 Start-CUHK-Classic-Fixture.cmd
 ```
 
-It reads only `test/fixtures/classic` and shows an offline label. `Open-CUHK.cmd` opens the built Dashboard directly; it does not perform the build step. The older `Start-CUHK.cmd`, `Check-CUHK.cmd` and `cuhk.cmd` paths belong to the inherited multi-school CLI flow and should not be used as evidence for the CUHK(SZ) Classic Dashboard.
+It reads only the synthetic source fixture in `src/classic/fixtures/synthetic-api.ts` and shows an offline label. `Open-CUHK.cmd` opens the built Dashboard directly; it does not perform the build step. The older `Start-CUHK.cmd`, `Check-CUHK.cmd` and `cuhk.cmd` paths belong to the inherited multi-school CLI flow and should not be used as evidence for the CUHK(SZ) Classic Dashboard.
 
 ## Tests
 
@@ -69,7 +71,7 @@ node scripts/verify-classic-electron.mjs
 npm.cmd test
 ```
 
-These commands are retained for reproducibility and user verification. In this round only the owner's current `npm.cmd run build` was run; tests, typecheck, the application, browser probes and the full suite were not run.
+These commands are retained for reproducibility and user verification. In this round, `npm.cmd run build` exited 0; tests, typecheck, the application, browser probes and the full suite were not run. Runtime and school-account acceptance remain USER TEST PENDING; the build record is in [M5 delivery](docs/CLASSIC_API_M5_DELIVERY.md).
 
 The previous full-suite record is kept as history rather than presented as a current run: 169 tests produced 158 PASS, 3 known baseline FAIL and 8 SKIP before the current runtime/session fixes. The current runtime has not been tested. Redirecting only the current process's `TEMP` and `TMP` into a writable workspace removes unrelated temporary-file EPERM errors for future targeted runs.
 
@@ -83,7 +85,7 @@ Manual acceptance must remain separate from fixture tests. A successful MCP hand
 
 ## Privacy and read-only boundary
 
-The inherited multi-school flow stores its existing local configuration and encrypted authorization state under the configured local data directory. CUHK(SZ) Classic uses a separate local Playwright browser session under a controlled profile path derived from the Dashboard state home and profile scope; this browser session is sensitive runtime data, and the application does not claim that the Classic browser session itself is encrypted. Set `LMS_HOME` to an isolated local directory when testing. Fixture mode does not touch the live profile. Never commit or share either runtime directory.
+The inherited multi-school flow stores its existing local configuration and encrypted authorization state under the configured local data directory. The rebuilt CUHK(SZ) Classic route uses an Electron-owned persistent partition/session created by the manual login flow; it does not copy or silently reuse the former Playwright profile. The session and protected cache are sensitive runtime data. Set `LMS_HOME` to an isolated local directory when testing. Fixture mode does not touch the live profile. Never commit or share runtime data, profiles or logs.
 
 The application does not accept passwords, cookies, tokens or MFA codes through MCP or renderer IPC. The exposed Classic tools are status, user-controlled login, courses, announcements, assignments, assignment details and course-file listing. There is no submit, upload or automatic courseware-download tool. External links are restricted to the CUHK Shenzhen Blackboard HTTPS origin.
 

@@ -51,12 +51,18 @@ export interface ClassicRequestBudget {
   readonly deadlineAt: number;
   readonly requestLimit: number;
   readonly responseBytesLimit: number;
+  /** Requests held back for a final on-budget identity check. */
+  readonly reserveRequests?: number;
+  /** Milliseconds held back for a final on-budget identity check. */
+  readonly reserveMs?: number;
 }
 
 export interface ClassicApiCallOptions {
   readonly signal: AbortSignal;
   readonly traceId?: TraceId;
   readonly budget?: ClassicRequestBudget;
+  /** Internal main-process phase; never accepted from renderer arguments. */
+  readonly allowReservedBudget?: boolean;
 }
 
 export interface ClassicApiRequest {
@@ -66,6 +72,7 @@ export interface ClassicApiRequest {
   readonly courseId?: string;
   readonly traceId?: TraceId;
   readonly budget: ClassicRequestBudget;
+  readonly allowReservedBudget?: boolean;
 }
 
 export interface ClassicApiResponse<T = unknown> {

@@ -52,93 +52,109 @@ function requireEntityId(label: string, keys: readonly string[]) {
 
 export const RawCourseSchema = z.object({
   ...rawEntityShape,
-  name: RawText.optional(),
-  title: RawText.optional(),
-  code: RawText.optional(),
-  courseCode: RawText.optional(),
-  url: z.string().max(4096).optional(),
+  name: RawText.nullable().optional(),
+  title: RawText.nullable().optional(),
+  code: RawText.nullable().optional(),
+  courseCode: RawText.nullable().optional(),
+  url: z.string().max(4096).nullable().optional(),
   availability: z.unknown().optional(),
 }).passthrough().superRefine(requireEntityId('course', ['id', 'courseId']));
 export type RawCourse = z.infer<typeof RawCourseSchema>;
 
 export const RawAnnouncementSchema = z.object({
   ...rawEntityShape,
-  title: RawText.optional(),
-  subject: RawText.optional(),
-  body: z.union([RawText, z.record(z.unknown())]).optional(),
-  displayText: RawText.optional(),
-  rawText: RawText.optional(),
-  createdDate: RawText.optional(),
-  createdAt: RawText.optional(),
-  modifiedDate: RawText.optional(),
-  modifiedAt: RawText.optional(),
-  startDateRestriction: RawText.optional(),
-  endDateRestriction: RawText.optional(),
-  startDate: RawText.optional(),
-  endDate: RawText.optional(),
-  publishedAt: RawText.optional(),
+  title: RawText.nullable().optional(),
+  subject: RawText.nullable().optional(),
+  body: z.union([RawText, z.record(z.unknown())]).nullable().optional(),
+  displayText: RawText.nullable().optional(),
+  rawText: RawText.nullable().optional(),
+  createdDate: RawText.nullable().optional(),
+  createdAt: RawText.nullable().optional(),
+  modifiedDate: RawText.nullable().optional(),
+  modifiedAt: RawText.nullable().optional(),
+  startDateRestriction: RawText.nullable().optional(),
+  endDateRestriction: RawText.nullable().optional(),
+  startDate: RawText.nullable().optional(),
+  endDate: RawText.nullable().optional(),
+  publishedAt: RawText.nullable().optional(),
   unread: z.boolean().optional(),
-  url: z.string().max(4096).optional(),
+  url: z.string().max(4096).nullable().optional(),
 }).passthrough().superRefine(requireEntityId('announcement', ['id', 'announcementId']));
 export type RawAnnouncement = z.infer<typeof RawAnnouncementSchema>;
 
 export const RawContentNodeSchema = z.object({
   ...rawEntityShape,
-  title: RawText.optional(),
-  name: RawText.optional(),
-  description: z.union([RawText, z.record(z.unknown())]).optional(),
+  title: RawText.nullable().optional(),
+  name: RawText.nullable().optional(),
+  description: z.union([RawText, z.record(z.unknown())]).nullable().optional(),
   contentHandler: z.unknown().optional(),
   hasChildren: z.boolean().optional(),
   availability: z.unknown().optional(),
-  url: z.string().max(4096).optional(),
+  url: z.string().max(4096).nullable().optional(),
   attachments: z.array(z.unknown()).optional(),
 }).passthrough().superRefine(requireEntityId('content node', ['id', 'contentId']));
 export type RawContentNode = z.infer<typeof RawContentNodeSchema>;
 
 export const RawGradeColumnSchema = z.object({
   ...rawEntityShape,
-  title: RawText.optional(),
-  name: RawText.optional(),
+  title: RawText.nullable().optional(),
+  name: RawText.nullable().optional(),
   due: RawText.nullable().optional(),
   dueDate: RawText.nullable().optional(),
-  grading: z.record(z.unknown()).optional(),
+  grading: z.record(z.unknown()).nullable().optional(),
 }).passthrough().superRefine(requireEntityId('grade column', ['id', 'columnId']));
 export type RawGradeColumn = z.infer<typeof RawGradeColumnSchema>;
 
 export const RawGradeSchema = z.object({
   ...rawEntityShape,
-  status: RawText.optional(),
-  attemptStatus: RawText.optional(),
-  submitted: z.boolean().optional(),
-  submittedAt: RawText.optional(),
-  attemptDate: RawText.optional(),
+  status: RawText.nullable().optional(),
+  attemptStatus: RawText.nullable().optional(),
+  submitted: z.boolean().nullable().optional(),
+  submittedAt: RawText.nullable().optional(),
+  attemptDate: RawText.nullable().optional(),
   attemptReceipt: RawAttemptReceiptSchema.nullable().optional(),
-  lastAttempt: z.record(z.unknown()).optional(),
-  receipt: z.record(z.unknown()).optional(),
-  attempt: z.record(z.unknown()).optional(),
+  lastAttempt: z.record(z.unknown()).nullable().optional(),
+  receipt: z.record(z.unknown()).nullable().optional(),
+  attempt: z.record(z.unknown()).nullable().optional(),
 }).passthrough().superRefine(requireEntityId('grade', ['id', 'gradeId']));
 export type RawGrade = z.infer<typeof RawGradeSchema>;
 
 export const RawAttemptSchema = z.object({
   ...rawEntityShape,
-  status: RawText.optional(),
-  submittedAt: RawText.optional(),
-  attemptDate: RawText.optional(),
+  status: RawText.nullable().optional(),
+  submittedAt: RawText.nullable().optional(),
+  attemptDate: RawText.nullable().optional(),
   attemptReceipt: RawAttemptReceiptSchema.nullable().optional(),
-  receipt: z.record(z.unknown()).optional(),
+  receipt: z.record(z.unknown()).nullable().optional(),
 }).passthrough().superRefine(requireEntityId('attempt', ['id', 'attemptId']));
 export type RawAttempt = z.infer<typeof RawAttemptSchema>;
 
+/** Fields observed in the internal calendarItems collection. */
+export const RawCalendarItemSchema = z.object({
+  ...rawEntityShape,
+  calendarId: RawId.nullable().optional(),
+  type: RawText.nullable().optional(),
+  title: RawText.nullable().optional(),
+  description: z.union([RawText, z.record(z.unknown())]).nullable().optional(),
+  start: RawText.nullable().optional(),
+  end: RawText.nullable().optional(),
+  modified: RawText.nullable().optional(),
+  dynamicCalendarItemProps: z.record(z.unknown()).nullable().optional(),
+}).passthrough().superRefine(requireEntityId('calendar item', ['id']));
+export type RawCalendarItem = z.infer<typeof RawCalendarItemSchema>;
+
 export const RawFileSchema = z.object({
   ...rawEntityShape,
-  name: RawText.optional(),
-  title: RawText.optional(),
-  fileName: RawText.optional(),
-  mimeType: RawText.optional(),
-  url: z.string().max(4096).optional(),
-  createdAt: RawText.optional(),
-  modifiedAt: RawText.optional(),
-  publishedAt: RawText.optional(),
+  name: RawText.nullable().optional(),
+  title: RawText.nullable().optional(),
+  fileName: RawText.nullable().optional(),
+  mimeType: RawText.nullable().optional(),
+  url: z.string().max(4096).nullable().optional(),
+  createdAt: RawText.nullable().optional(),
+  modifiedAt: RawText.nullable().optional(),
+  created: RawText.nullable().optional(),
+  modified: RawText.nullable().optional(),
+  publishedAt: RawText.nullable().optional(),
   attachments: z.array(z.unknown()).optional(),
 }).passthrough().superRefine(requireEntityId('file', ['id', 'attachmentId', 'contentId']));
 export type RawFile = z.infer<typeof RawFileSchema>;
@@ -147,7 +163,7 @@ export const RawCollectionSchema = z.object({
   results: z.array(z.unknown()).optional(),
   items: z.array(z.unknown()).optional(),
   data: z.array(z.unknown()).optional(),
-  paging: RawPagingSchema.optional(),
+  paging: RawPagingSchema.nullable().optional(),
 }).passthrough().superRefine((value, ctx) => {
   if (!value.results && !value.items && !value.data) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Collection response must contain a results/items/data array.' });
 });

@@ -2,20 +2,20 @@
 
 > **测试环境（2026-10-10）：** `cmd /c ver` 报告 Windows build `10.0.26300.9550`、AMD64；使用 bundled Node `24.19.0`、npm `11.19.1`、bundled Python `3.12.14`、Electron `44.4.3` 和 Playwright Chromium `153.0.8010.12`。受限测试主机无法访问 WMI/CIM edition caption，因此不从注册表残留值推断系统版本名称。
 >
-> **当前状态：** owner 已完成当前 runtime/session 代码修复，本轮 `npm.cmd run build` 已由 owner 执行并 PASS。final_review 静态复核完成，未发现新的业务阻断。本轮没有运行测试、typecheck、应用、浏览器探针或真实学校登录。Python 21/21、Classic TypeScript 18/18、完成标记 5/5、stdio 8 工具、typecheck 和无 flags Electron live/mock 结果，全部是这些修复之前的历史记录，不能证明当前代码。当前 runtime 和人工测试状态：`USER TEST PENDING / UNTESTED`。真实学校身份认证、真实课程对照和 Windows 安装包仍是 BLOCKED。待验证范围和历史证据见 [交付状态](docs/DELIVERY.md)。
+> **当前状态：** 后端 JSON API 重建正在 M0 契约之上集成。M0 已提交；最近一次 M1–M5 `npm.cmd run build` exit 0。本轮不运行测试、typecheck、应用、浏览器探针或真实学校登录；早期 Python/sidecar、Classic TypeScript、完成标记、typecheck 和 Electron harness 结果都是历史记录，不能证明重建链路。当前 runtime 和人工测试状态：`USER TEST PENDING / UNTESTED`。真实学校身份认证、真实课程对照和 Windows 安装包仍是 BLOCKED。见[交付状态](docs/DELIVERY.md)和 [M5 交付说明](docs/CLASSIC_API_M5_DELIVERY.md)。
 
 [English README](README.md)
 
-这是一个面向香港中文大学（深圳）Blackboard Classic 的本地只读开发预览。Dashboard 根源码来自 [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard)，Python sidecar 来自 [bb-mcp](https://github.com/changshenhan/bb-mcp)。当前上游 SHA、导入路径和许可证记录见 [M0 基线报告](docs/M0-baseline.md)。
+这是一个面向香港中文大学（深圳）Blackboard Classic 的本地只读开发预览。重建后的 CUHK(SZ) 路径是 `src/classic/` 下的类型化固定学校 origin JSON API reader，由 Electron 主进程管理会话和资源边界。继承的 [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) 源码和 [bb-mcp](https://github.com/changshenhan/bb-mcp) Python sidecar 仍保留作历史/公共 MCP 兼容源码；新 Classic 路径不会静默回退到它们。上游 SHA、导入路径和许可证记录见 [M0 基线报告](docs/M0-baseline.md)。
 
 Dashboard 展示课程、公告、作业和课程资料链接。连接器不提交作业、不上传文件、不下载课件。登录和 MFA 只在用户自己操作的、可见的官方 Blackboard 页面中完成。本项目与 CUHK、Blackboard、Anthology 及两个上游项目均无官方合作关系。
 
 ## 已验证范围
 
-- 上一轮 fixture 运行覆盖了有边界的 Classic 结构化快照、Python stdio MCP sidecar、Node provider 和真实 Electron 主进程 IPC；当前 runtime 尚未重新运行这些路径。
-- owner 在本轮代码修复后执行了 `npm.cmd run build` 并 PASS；typecheck 和下方测试计数仍是历史记录。
+- M0 schema 和 synthetic API fixture 已作为源码交付。重建 reader 保留有界分页、账号/代次核对、类型化提交证据、明确日历关联、受保护账号缓存和可见的 partial coverage；当前 build 已通过，仍待用户本机运行。
+- 早期 fixture、sidecar、Electron 和 typecheck 结果均为历史记录。最近一次 build exit 0；不宣称当前 runtime 已通过。
 
-离线 fixture 和登录 harness 证据都是当前 runtime/session 修复之前的历史记录。当前代码已包含 complete 后保留用户持有的 Playwright context、用活跃授权 context 读取课程、按课程区分 `AUTH_REQUIRED`、有界 snapshot 超时保留部分数据，以及同源 iframe/读取预算；本轮没有运行这些路径，状态仍为 `USER TEST PENDING / UNTESTED`。浏览器启动和 `AUTH_REQUIRED` 结果都不能当作学校身份认证成功。真人学校验收和安装包边界见 [交付状态](docs/DELIVERY.md)。
+离线 fixture 和登录 harness 属于旧 sidecar/provider 路径的历史记录。重建路径使用用户手动发起的 Electron session、单次有界 JSON snapshot 预算、固定学校 origin 的 GET/HEAD transport、受保护账号缓存和主进程 opaque resource。本轮没有运行这些路径，状态仍为 `USER TEST PENDING / UNTESTED`。看到登录窗口或得到 `AUTH_REQUIRED` 都不能当作学校身份认证成功。真人学校验收和安装包边界见 [交付状态](docs/DELIVERY.md)。
 
 ## Windows 开发安装
 
@@ -27,7 +27,9 @@ node node_modules/electron/install.js
 npm.cmd run build
 ```
 
-sidecar 使用独立的 Python 3.10+ 环境。不要使用系统 Python 3.14。安装后先检查解释器版本。在 Windows CMD 窗口中，安装 Playwright 前先为当前窗口设置浏览器目录：
+重建后的 Classic JSON API 路径只需要上面的 Node/Electron 依赖。会话由用户点击手动登录时创建，不复制或自动迁移旧 Playwright profile。下面的 Python 安装说明只用于保留的历史 sidecar/MCP 路径，不是重建 Classic reader 的依赖。
+
+如需使用历史 sidecar，请创建独立的 Python 3.10+ 环境。不要使用系统 Python 3.14。安装后先检查解释器版本。在 Windows CMD 窗口中，安装 Playwright 前先为当前窗口设置浏览器目录：
 
 ```bat
 py -3.12 -m venv sidecar\bb-mcp\.venv
@@ -53,7 +55,7 @@ Start-CUHK-Classic.cmd
 Start-CUHK-Classic-Fixture.cmd
 ```
 
-fixture 只读取 `test/fixtures/classic`，界面会显示离线标签。`Open-CUHK.cmd` 直接打开已经 build 的 Dashboard，不负责 build。旧的 `Start-CUHK.cmd`、`Check-CUHK.cmd` 和 `cuhk.cmd` 属于继承的多学校 CLI 流程，不应作为 CUHK(SZ) Classic Dashboard 的验收证据。
+fixture 只读取 `src/classic/fixtures/synthetic-api.ts`，界面会显示离线标签。`Open-CUHK.cmd` 直接打开已经 build 的 Dashboard，不负责 build。旧的 `Start-CUHK.cmd`、`Check-CUHK.cmd` 和 `cuhk.cmd` 属于继承的多学校 CLI 流程，不应作为 CUHK(SZ) Classic Dashboard 的验收证据。
 
 ## 测试命令
 
@@ -69,7 +71,7 @@ node scripts/verify-classic-electron.mjs
 npm.cmd test
 ```
 
-以上命令保留用于复现和用户验证。本轮只有 owner 当前的 `npm.cmd run build` 已执行；测试、typecheck、应用、浏览器探针和全套回归均未运行。
+以上命令保留用于复现和用户验证。本轮没有运行测试、typecheck、应用、浏览器探针和全套回归；本轮 `npm.cmd run build` 已实际 exit 0，真实运行仍待用户完成，详见 [M5 交付说明](docs/CLASSIC_API_M5_DELIVERY.md)。
 
 上一阶段全套测试记录会作为历史保留：当前 runtime/session 修复前共 169 项，158 PASS、3 个已知基线 FAIL、8 SKIP；当前 runtime 尚未测试。只把当前进程的 `TEMP`、`TMP` 指向可写工作区可以消除未来定向运行中的无关临时文件 EPERM。
 
@@ -83,7 +85,7 @@ npm.cmd test
 
 ## 隐私与只读边界
 
-继承的多学校流程会把原有本地配置和加密授权状态写入配置的数据目录。CUHK(SZ) Classic 使用独立的本地 Playwright 浏览器 session，路径由 Dashboard state home 和 profile scope 派生并受控；该浏览器 session 属于敏感运行数据，应用不声称 Classic 浏览器 session 本身已加密。测试时可以设置 `LMS_HOME` 指向独立的本地目录。fixture 模式不会触碰 live profile。不要提交或分享这些运行目录。
+继承的多学校流程会把原有本地配置和加密授权状态写入配置的数据目录。重建后的 CUHK(SZ) Classic 路径使用手动登录流程创建的 Electron 持久 partition/session，不复制或静默复用旧 Playwright profile。session 和受保护缓存都是敏感运行数据。测试时可以设置 `LMS_HOME` 指向独立的本地目录。fixture 模式不会触碰 live profile。不要提交或分享运行数据、profile 或日志。
 
 应用不会通过 MCP 或 renderer IPC 接收密码、Cookie、token 或 MFA 验证码。Classic 暴露的工具只有状态、用户驱动登录、课程、公告、作业、作业详情和课程资料列表，没有提交、上传或自动课件下载工具。外部链接只允许 CUHK(SZ) Blackboard HTTPS 域名。
 

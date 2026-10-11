@@ -36,6 +36,7 @@
     "commander": "14.0.3",
     "ical-generator": "10.0.0",
     "proper-lockfile": "4.1.2",
+    "sanitize-html": "^2.18.0",
     "tar": "7.5.22",
     "tough-cookie": "5.1.2",
     "unpdf": "1.8.1",

@@ -18,7 +18,7 @@ function validCalendarDate(value: string): boolean {
   return month >= 1 && month <= 12 && day >= 1 && date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 const DateTime = z.string().trim().min(1).max(100)
-  .refine(value => /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?$/.test(value), 'Expected a date-time with a time component')
+  .refine(value => /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})$/.test(value), 'Expected a date-time with an explicit timezone')
   .refine(value => validCalendarDate(value) && Number.isFinite(Date.parse(value)), 'Expected a valid calendar date-time');
 const DateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD').refine(validCalendarDate, 'Expected a valid calendar date');
 const Url = z.string().url().max(4096);
@@ -26,7 +26,7 @@ const Url = z.string().url().max(4096);
 export const FetchStateV2Schema = z.enum(['ok', 'partial', 'error', 'auth-required']);
 export type FetchStateV2 = z.infer<typeof FetchStateV2Schema>;
 
-export const EvidenceV2Schema = z.enum(['blackboard-field', 'page-text', 'user-entered', 'unknown']);
+export const EvidenceV2Schema = z.enum(['blackboard-field', 'calendar', 'page-text', 'user-entered', 'unknown']);
 export type EvidenceV2 = z.infer<typeof EvidenceV2Schema>;
 
 export const CoverageStateSchema = z.enum(['complete', 'partial', 'unsupported', 'failed']);
@@ -136,6 +136,8 @@ export const AssignmentV2Schema = z.object({
   courseId: Id,
   contentId: Id.nullable(),
   columnId: Id.nullable(),
+  /** All verified grade columns linked to this content, preserving one-to-many relations. */
+  columnIds: z.array(Id).max(100).optional(),
   kind: AssignmentKindSchema,
   title: z.string().trim().min(1).max(500),
   dueAt: DateTime.nullable(),
@@ -169,6 +171,8 @@ export const CourseFileV2Schema = z.object({
   name: z.string().trim().min(1).max(500),
   kind: CourseFileKindSchema,
   url: Url.nullable(),
+  /** Clean external target for a user-selected system-browser action. */
+  externalUrl: Url.nullable().optional(),
   createdAt: DateTime.nullable(),
   modifiedAt: DateTime.nullable(),
   publishedAt: DateTime.nullable(),
