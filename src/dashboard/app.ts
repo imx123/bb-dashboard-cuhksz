@@ -124,6 +124,7 @@ function rendererEventDetails(eventName: string, details: unknown): Record<strin
     ...(typeof input.sourceUrl === 'string' ? { sourceUrl: input.sourceUrl.slice(0, 900) } : {}),
   };
   if (eventName === 'renderer.unhandledrejection') return { errorType: safeErrorType(input.errorType) };
+  if (eventName === 'renderer.bridge-ready') return { marker: 'BRIDGE_READY' };
   return {};
 }
 
@@ -134,6 +135,10 @@ function withDiagnostics(value: unknown, traceId: string): unknown {
 
 const RENDER_ERROR_TYPES = new Set(['Error', 'TypeError', 'SyntaxError', 'ReferenceError', 'RangeError', 'EvalError', 'URIError', 'ImportError', 'ModuleNotFoundError', 'IndentationError', 'TimeoutError']);
 const RENDER_GONE_REASONS = new Set(['clean-exit', 'abnormal-exit', 'killed', 'crashed', 'oom', 'launch-failed', 'integrity-failure']);
+const CONSOLE_LEVELS = new Set(['info', 'warning', 'error', 'debug']);
+const DASHBOARD_SCRIPT_MARKER = 'CUHK_DASHBOARD_SCRIPT_START';
+const DASHBOARD_BRIDGE_MARKER = 'CUHK_DASHBOARD_BRIDGE_UNAVAILABLE';
+const CONSOLE_ERROR_TYPES = ['SyntaxError', 'ReferenceError', 'TypeError', 'RangeError', 'EvalError', 'URIError', 'ImportError', 'ModuleNotFoundError', 'TimeoutError', 'Error'] as const;
 
 function safeErrorType(value: unknown): string {
   const name = typeof value === 'string' ? value : value && typeof value === 'object' && typeof (value as { name?: unknown }).name === 'string' ? (value as { name: string }).name : '';
@@ -146,6 +151,36 @@ function safeGoneReason(value: unknown): string {
 
 function safeExitCode(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) ? Math.max(-32768, Math.min(32767, value)) : undefined;
+}
+
+function safeConsoleSource(value: unknown): string {
+  if (typeof value !== 'string') return 'other';
+  try {
+    const protocol = new URL(value).protocol.toLowerCase();
+    if (protocol === 'data:') return 'dashboard-inline';
+    if (protocol === 'file:') return 'local-file';
+    if (protocol === 'http:' || protocol === 'https:') return 'remote-page';
+  } catch { /* keep only the fixed fallback category */ }
+  return 'other';
+}
+
+function safeConsoleLevel(value: unknown): string {
+  return typeof value === 'string' && CONSOLE_LEVELS.has(value) ? value : 'error';
+}
+
+function safeConsoleLine(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) ? Math.max(0, Math.min(1_000_000, value)) : 0;
+}
+
+function classifyConsoleMessage(value: unknown): { code: string; errorType: string } {
+  const text = typeof value === 'string' ? value.toLowerCase() : '';
+  if (text.includes('content security policy') || text.includes('content-security-policy') || text.includes('refused to execute inline script')) {
+    return { code: 'RENDERER_CSP_ERROR', errorType: 'CSP' };
+  }
+  for (const errorType of CONSOLE_ERROR_TYPES) {
+    if (text.includes(errorType.toLowerCase())) return { code: `RENDERER_${errorType.toUpperCase()}`, errorType };
+  }
+  return { code: 'RENDERER_CONSOLE_ERROR', errorType: 'generic' };
 }
 
 function safeBusinessId(value: unknown): string {
@@ -251,6 +286,19 @@ export async function startDashboard(options: DashboardOptions = {}) {
 
   const win = new BrowserWindow({ title: 'CUHK(SZ) · Blackboard Classic', width: 1240, height: 850, minWidth: 800, minHeight: 600, show: false,
     backgroundColor: '#f6f4f9', webPreferences: { preload: fileURLToPath(new URL('./preload.cjs', import.meta.url)), sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  win.webContents.on('console-message', details => {
+    const sourceType = safeConsoleSource(details.sourceId);
+    const level = safeConsoleLevel(details.level);
+    const lineNumber = safeConsoleLine(details.lineNumber);
+    if (details.message === DASHBOARD_SCRIPT_MARKER) {
+      debugLog.event('dashboard.renderer.marker', { code: 'DASHBOARD_SCRIPT_START', marker: 'SCRIPT_START', level, lineNumber, sourceType });
+    } else if (details.message === DASHBOARD_BRIDGE_MARKER) {
+      debugLog.event('dashboard.renderer.marker', { code: 'DASHBOARD_BRIDGE_UNAVAILABLE', marker: 'BRIDGE_UNAVAILABLE', level, lineNumber, sourceType });
+    } else if (level === 'error') {
+      const classification = classifyConsoleMessage(details.message);
+      debugLog.event('dashboard.renderer.console-error', { ...classification, level, lineNumber, sourceType });
+    }
+  });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', event => event.preventDefault());
   win.webContents.on('preload-error', (_event, _preloadPath, error) => debugLog.event('dashboard.preload-error', { errorType: safeErrorType(error) }));

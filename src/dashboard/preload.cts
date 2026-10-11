@@ -19,3 +19,8 @@ contextBridge.exposeInMainWorld('cuhk', {
   openDiagnostics: () => ipcRenderer.invoke('cuhk:open-diagnostics'),
   copyDiagnostics: () => ipcRenderer.invoke('cuhk:copy-diagnostics'),
 });
+try {
+  void ipcRenderer.invoke('cuhk:debug-event', 'renderer.bridge-ready', { marker: 'CUHK_DASHBOARD_BRIDGE_READY' }).catch(() => undefined);
+} catch {
+  // The renderer has a fixed console marker even if the diagnostic bridge is unavailable.
+}
