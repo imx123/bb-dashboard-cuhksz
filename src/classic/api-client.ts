@@ -123,6 +123,8 @@ export class ClassicApiClient {
       complete: result.complete,
       truncated: result.truncated,
       errorCount: result.errors.length,
+      errorCodes: result.errors.slice(0, 8).map(error => error.code),
+      errorScopes: result.errors.slice(0, 8).map(error => error.scope),
     });
     return result;
   }
