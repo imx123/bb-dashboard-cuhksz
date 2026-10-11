@@ -490,6 +490,7 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
   let next: string | null = null;
   const errors: PublicClassicApiError[] = [];
   let itemErrors = false;
+  let emptyCalendarPageCount = 0;
   const schemaDiagnostics = createSchemaDiagnostics();
   const finishPartial = (error: unknown, stage: PaginationStage = 'transport'): PaginatedResult<T> => {
     const typed = paginationError(error, `pagination:${options.initial.resource}`, stage);
@@ -509,7 +510,21 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
       stage = 'collection-envelope';
       const page = parseRawCollection(response.data, `pagination:${target.resource}`);
       const values = collectionItems(page);
-      if (values.length === 0 && pagingLink(page)) throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 空分页页仍带有 next link。', { scope: `pagination:${target.resource}`, retryable: false });
+      const pageNext = pagingLink(page);
+      if (values.length === 0 && pageNext) {
+        if (target.resource !== 'calendar') {
+          throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 空分页页仍带有 next link。', { scope: `pagination:${target.resource}`, retryable: false });
+        }
+        emptyCalendarPageCount += 1;
+        debugLog.event('classic.api.calendar.empty-page', {
+          traceId: options.traceId,
+          resource: target.resource,
+          pages,
+          emptyPageCount: emptyCalendarPageCount,
+          hasNext: true,
+          targetUrl: target.url.href,
+        });
+      }
       stage = 'collection-item';
       const pageItems: T[] = [];
       for (let index = 0; index < values.length; index += 1) {
@@ -524,7 +539,7 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
         }
       }
       items.push(...pageItems);
-      next = pagingLink(page);
+      next = pageNext;
       if (!next) {
         logSchemaSummary(target, options.traceId, schemaDiagnostics, items.length);
         return { items, pages, complete: !itemErrors, truncated: false, nextPage: null, errors };
