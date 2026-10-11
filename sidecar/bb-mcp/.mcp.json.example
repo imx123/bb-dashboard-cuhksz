@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bb-cuhk-classic": {
+      "command": "C:\\path\\to\\venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\bb-mcp\\server.py"],
+      "env": {
+        "BB_USER_DATA_DIR": "C:\\path\\to\\user-data\\classic-profile"
+      }
+    }
+  }
+}

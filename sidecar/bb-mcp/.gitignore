@@ -1,0 +1,10 @@
+.venv/
+profile/
+classic-profile/
+runtime-data/
+.browser-cleanup-*/
+cred.json
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/

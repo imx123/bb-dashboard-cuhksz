@@ -1,0 +1,30 @@
+{
+  "name": "lms-cli",
+  "version": "0.4.7",
+  "description": "Multi-school Canvas / Blackboard CLI and Agent tools for school discovery, courses, announcements, assignments, feedback and schedules.",
+  "author": {
+    "name": "zs-andy and contributors",
+    "url": "https://github.com/zs-andy"
+  },
+  "homepage": "https://github.com/zs-andy/lms-cli",
+  "repository": "https://github.com/zs-andy/lms-cli",
+  "license": "MIT",
+  "keywords": ["lms", "canvas", "blackboard", "education", "mcp", "multi-school"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "lms-cli",
+    "shortDescription": "多学校 Canvas / Blackboard CLI 与 Agent 工具",
+    "longDescription": "社区维护的多学校 CLI 与 Agent 工具。搜索并确认学校网址和时区后，查询 Canvas / Blackboard 的课程、通知、作业与反馈，按需保存待办、导出日历。支持独立账号、终端配置及更新提示；仅必要的学校授权使用窗口。非学校官方产品，具体功能取决于学校政策、接口权限和平台版本。",
+    "developerName": "zs-andy and contributors",
+    "websiteURL": "https://github.com/zs-andy/lms-cli",
+    "privacyPolicyURL": "https://github.com/zs-andy/lms-cli/blob/main/PRIVACY.md",
+    "category": "Productivity",
+    "brandColor": "#000000",
+    "capabilities": ["Interactive", "Read"],
+    "composerIcon": "./assets/lms-icon.png",
+    "logo": "./assets/lms-icon.png",
+    "logoDark": "./assets/lms-icon.png",
+    "defaultPrompt": ["整理本周安排，考虑老师通知里的作业和调课。", "两平台最近有哪些重要通知？", "帮我查找指定课程的评分反馈和相关资料。"]
+  },
+  "mcpServers": "./.mcp.json"
+}

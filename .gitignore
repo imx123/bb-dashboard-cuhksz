@@ -1,0 +1,54 @@
+# Local upstream checkouts used for reproducible source import
+.work/
+
+# Python environments and browser/session data
+**/.venv/
+**/venv/
+**/env/
+**/profile/
+**/*profile*/
+**/cred.json
+**/*.log
+
+# Runtime state, caches, downloads, and build output
+**/.runtime/
+**/runtime/
+**/.cache/
+**/cache/
+**/downloads/
+**/build/
+**/dist/
+**/out/
+
+# Local coverage and test artifacts
+**/.pytest_cache/
+**/.coverage
+**/coverage/
+
+# Imported Dashboard upstream rules
+node_modules/
+release/
+release*/
+release-cli/
+dist.previous*/
+*.previous*/
+.update-backup*/
+*.tgz
+*.zip
+*.dmg
+*.exe
+*.AppImage
+*.blockmap
+.env
+.env.*
+!.env.example
+.DS_Store
+.cuhk-data/
+.cuhk-node
+*.tsbuildinfo
+profiles.json
+vault/
+*.har
+*.ics
+*.pem
+*.key
