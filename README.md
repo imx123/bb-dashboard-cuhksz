@@ -55,7 +55,7 @@ The fixture-only demonstration is safe to run without an account:
 Start-CUHK-Classic-Fixture.cmd
 ```
 
-It reads only the synthetic source fixture in `src/classic/fixtures/synthetic-api.ts` and shows an offline label. `Open-CUHK.cmd` opens the built Dashboard directly; it does not perform the build step. The older `Start-CUHK.cmd`, `Check-CUHK.cmd` and `cuhk.cmd` paths belong to the inherited multi-school CLI flow and should not be used as evidence for the CUHK(SZ) Classic Dashboard.
+It reads only the synthetic source fixture in `src/classic/fixtures/synthetic-api.ts` and shows an offline label. Use the Classic launchers above; the former Hong Kong CUHK preset and legacy launchers have been removed.
 
 ## Tests
 

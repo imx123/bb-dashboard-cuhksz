@@ -55,7 +55,7 @@ Start-CUHK-Classic.cmd
 Start-CUHK-Classic-Fixture.cmd
 ```
 
-fixture 只读取 `src/classic/fixtures/synthetic-api.ts`，界面会显示离线标签。`Open-CUHK.cmd` 直接打开已经 build 的 Dashboard，不负责 build。旧的 `Start-CUHK.cmd`、`Check-CUHK.cmd` 和 `cuhk.cmd` 属于继承的多学校 CLI 流程，不应作为 CUHK(SZ) Classic Dashboard 的验收证据。
+fixture 只读取 `src/classic/fixtures/synthetic-api.ts`，界面会显示离线标签。请使用上面的 Classic 启动脚本；原香港 CUHK 预设及旧启动入口已经移除。
 
 ## 测试命令
 

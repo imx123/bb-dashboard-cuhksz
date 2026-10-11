@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, locked, stateHome } from '../config.js';
-import type { DashboardTask } from './data.js';
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const completionScope = (profile: string, origin: string, userId: string) => hash([profile, origin, userId]);
