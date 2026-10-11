@@ -289,10 +289,69 @@ function paginationError(error: unknown, scope: string, stage: PaginationStage =
 
 type PaginationRejectReason = 'parse-invalid' | 'origin' | 'path' | 'course' | 'static-selector' | 'duplicate-selector';
 
-const ISO_RANGE_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_RANGE_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/;
+
+type RangeDiagnostic = {
+  readonly rangesComparable: boolean;
+  readonly intervalWithinOriginal: boolean;
+};
+
+function rangeInstant(value: string): number | undefined {
+  const match = ISO_RANGE_DATETIME.exec(value);
+  if (!match) return undefined;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const zone = match[8];
+  if (zone === undefined) return undefined;
+  const zoneHour = zone === 'Z' ? 0 : Number(zone.slice(1, 3));
+  const zoneMinute = zone === 'Z' ? 0 : Number(zone.slice(4, 6));
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (daysInMonth === undefined || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 || zoneHour > 23 || zoneMinute > 59) {
+    return undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 function rangeComparable(value: string): boolean {
-  return ISO_RANGE_DATETIME.test(value) && Number.isFinite(Date.parse(value));
+  return rangeInstant(value) !== undefined;
+}
+
+function calendarRangeDiagnostics(target: ClassicEndpointTarget, next: URL | null): RangeDiagnostic | undefined {
+  if (target.resource !== 'calendar' || !next) return undefined;
+  const originalSince = target.url.searchParams.getAll('since');
+  const originalUntil = target.url.searchParams.getAll('until');
+  const nextSince = next.searchParams.getAll('since');
+  const nextUntil = next.searchParams.getAll('until');
+  if (originalSince.length !== 1 || originalUntil.length !== 1 || nextSince.length !== 1 || nextUntil.length !== 1) {
+    return { rangesComparable: false, intervalWithinOriginal: false };
+  }
+  const originalSinceValue = originalSince[0];
+  const originalUntilValue = originalUntil[0];
+  const nextSinceValue = nextSince[0];
+  const nextUntilValue = nextUntil[0];
+  if (originalSinceValue === undefined || originalUntilValue === undefined || nextSinceValue === undefined || nextUntilValue === undefined) {
+    return { rangesComparable: false, intervalWithinOriginal: false };
+  }
+  const originalSinceInstant = rangeInstant(originalSinceValue);
+  const originalUntilInstant = rangeInstant(originalUntilValue);
+  const nextSinceInstant = rangeInstant(nextSinceValue);
+  const nextUntilInstant = rangeInstant(nextUntilValue);
+  if (originalSinceInstant === undefined || originalUntilInstant === undefined || nextSinceInstant === undefined || nextUntilInstant === undefined) {
+    return { rangesComparable: false, intervalWithinOriginal: false };
+  }
+  return {
+    rangesComparable: true,
+    intervalWithinOriginal: originalSinceInstant <= originalUntilInstant
+      && nextSinceInstant >= originalSinceInstant
+      && nextUntilInstant <= originalUntilInstant
+      && nextSinceInstant <= nextUntilInstant,
+  };
 }
 
 function selectorDiagnostics(selector: typeof STATIC_QUERY_KEYS[number], target: ClassicEndpointTarget, next: URL | null): Record<string, number | boolean> {
@@ -316,6 +375,7 @@ function selectorDiagnostics(selector: typeof STATIC_QUERY_KEYS[number], target:
 }
 
 function logPaginationReject(reason: PaginationRejectReason, current: URL, target: ClassicEndpointTarget, next: URL | null, selector?: typeof STATIC_QUERY_KEYS[number], traceId?: TraceId): void {
+  const range = selector === 'since' || selector === 'until' ? calendarRangeDiagnostics(target, next) : undefined;
   debugLog.event('classic.api.pagination-reject', {
     traceId,
     resource: target.resource,
@@ -323,9 +383,26 @@ function logPaginationReject(reason: PaginationRejectReason, current: URL, targe
     reason,
     ...(selector ? { selector } : {}),
     ...(selector ? selectorDiagnostics(selector, target, next) : {}),
+    ...(range ?? {}),
     initialUrl: target.url.href,
     targetUrl: current.href,
     ...(next ? { nextUrl: next.href } : {}),
+  });
+}
+
+function logAcceptedCalendarRange(current: URL, target: ClassicEndpointTarget, next: URL, selector: 'since' | 'until', traceId?: TraceId): void {
+  const range = calendarRangeDiagnostics(target, next);
+  if (!range) return;
+  debugLog.event('classic.api.pagination-range', {
+    traceId,
+    resource: target.resource,
+    courseId: target.courseId,
+    accepted: true,
+    selector,
+    ...range,
+    initialUrl: target.url.href,
+    targetUrl: current.href,
+    nextUrl: next.href,
   });
 }
 
@@ -353,8 +430,9 @@ function nextUrl(value: string, current: URL, target: ClassicEndpointTarget, tra
     if (!path.split('/').includes(target.courseId)) return rejectPaginationUrl('course', 'Blackboard 分页链接超出当前课程。', current, target, next, undefined, traceId);
   }
   // Relative links emitted by Blackboard sometimes omit static query values.
-  // Restore omitted values, but reject both duplicate and newly-added account
-  // or range selectors so a next link cannot silently change the read scope.
+  // Restore omitted values. Account and non-calendar range selectors remain
+  // strict; calendar ranges may only narrow the original authorized window.
+  let changedRangeSelector: 'since' | 'until' | undefined;
   for (const key of STATIC_QUERY_KEYS) {
     const expected = target.url.searchParams.getAll(key);
     const actual = next.searchParams.getAll(key);
@@ -369,9 +447,23 @@ function nextUrl(value: string, current: URL, target: ClassicEndpointTarget, tra
       for (const valuePart of expected) next.searchParams.append(key, valuePart);
       continue;
     }
+    if (key === 'since' || key === 'until') {
+      if (actual.length !== expected.length || actual.some((part, index) => part !== expected[index])) {
+        changedRangeSelector ??= key;
+      }
+      continue;
+    }
     if (actual.length !== expected.length || actual.some((part, index) => part !== expected[index])) {
       return rejectPaginationUrl('static-selector', 'Blackboard 分页链接改变了当前读取范围。', current, target, next, key, traceId);
     }
+  }
+  if (changedRangeSelector) {
+    const range = calendarRangeDiagnostics(target, next);
+    if (range?.rangesComparable && range.intervalWithinOriginal) {
+      logAcceptedCalendarRange(current, target, next, changedRangeSelector, traceId);
+      return next;
+    }
+    return rejectPaginationUrl('static-selector', 'Blackboard 分页链接改变了当前读取范围。', current, target, next, changedRangeSelector, traceId);
   }
   return next;
 }

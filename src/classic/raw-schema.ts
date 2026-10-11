@@ -50,6 +50,20 @@ function requireEntityId(label: string, keys: readonly string[]) {
   };
 }
 
+function requireCalendarRowContext(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  const hasContext = ['calendarId'].some(key => {
+    const item = value[key];
+    return (typeof item === 'string' && item.trim().length > 0) || (typeof item === 'number' && Number.isSafeInteger(item));
+  });
+  const hasExplicitItemId = ['id', 'calendarItemId', 'eventId'].some(key => {
+    const item = value[key];
+    return (typeof item === 'string' && item.trim().length > 0) || (typeof item === 'number' && Number.isSafeInteger(item));
+  });
+  if (!hasContext && !hasExplicitItemId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Calendar row lacks a verified context or explicit item identifier.' });
+  }
+}
+
 export const RawCourseSchema = z.object({
   ...rawEntityShape,
   name: RawText.nullable().optional(),
@@ -107,6 +121,12 @@ export type RawGradeColumn = z.infer<typeof RawGradeColumnSchema>;
 
 export const RawGradeSchema = z.object({
   ...rawEntityShape,
+  // The observed collection shape has rows with id=null while gradeId is
+  // missing, with columnId and userId still present. Preserve that shape
+  // without inferring why the grade identifier is absent or treating the
+  // column identifier as a grade identifier.
+  id: RawId.nullable().optional(),
+  gradeId: RawId.nullable().optional(),
   status: RawText.nullable().optional(),
   attemptStatus: RawText.nullable().optional(),
   submitted: z.boolean().nullable().optional(),
@@ -116,7 +136,7 @@ export const RawGradeSchema = z.object({
   lastAttempt: z.record(z.unknown()).nullable().optional(),
   receipt: z.record(z.unknown()).nullable().optional(),
   attempt: z.record(z.unknown()).nullable().optional(),
-}).passthrough().superRefine(requireEntityId('grade', ['id', 'gradeId']));
+}).passthrough().superRefine(requireEntityId('grade', ['id', 'gradeId', 'columnId']));
 export type RawGrade = z.infer<typeof RawGradeSchema>;
 
 export const RawAttemptSchema = z.object({
@@ -132,6 +152,12 @@ export type RawAttempt = z.infer<typeof RawAttemptSchema>;
 /** Fields observed in the internal calendarItems collection. */
 export const RawCalendarItemSchema = z.object({
   ...rawEntityShape,
+  // The observed internal calendarItems rows use calendarId while id is
+  // missing. Keep the item for coverage, but do not infer its course or task
+  // association from this identifier.
+  id: RawId.nullable().optional(),
+  calendarItemId: RawId.nullable().optional(),
+  eventId: RawId.nullable().optional(),
   calendarId: RawId.nullable().optional(),
   type: RawText.nullable().optional(),
   title: RawText.nullable().optional(),
@@ -140,7 +166,7 @@ export const RawCalendarItemSchema = z.object({
   end: RawText.nullable().optional(),
   modified: RawText.nullable().optional(),
   dynamicCalendarItemProps: z.record(z.unknown()).nullable().optional(),
-}).passthrough().superRefine(requireEntityId('calendar item', ['id']));
+}).passthrough().superRefine(requireCalendarRowContext);
 export type RawCalendarItem = z.infer<typeof RawCalendarItemSchema>;
 
 export const RawFileSchema = z.object({

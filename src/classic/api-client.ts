@@ -221,7 +221,30 @@ export class ClassicApiClient {
 
   async calendar(options: ClassicApiCallOptions, since: string, until: string, query?: CollectionQuery): Promise<PaginatedResult<RawCalendarItem>> {
     await this.ensure(options);
-    return this.page(this.endpoints.calendar(since, until, query), options, value => RawCalendarItemSchema.parse(record(value, 'api.calendar')));
+    const result = await this.page(this.endpoints.calendar(since, until, query), options, value => RawCalendarItemSchema.parse(record(value, 'api.calendar')));
+    let gradebookColumnCount = 0;
+    let knownNonGradebookCount = 0;
+    let unknownTypeCount = 0;
+    let unboundCount = 0;
+    for (const item of result.items) {
+      const value = item as RawObject;
+      const type = rawString(value.type)?.toLowerCase();
+      if (type === 'gradebookcolumn') gradebookColumnCount += 1;
+      else if (type) knownNonGradebookCount += 1;
+      else unknownTypeCount += 1;
+      if (!rawId(value, 'courseId')) unboundCount += 1;
+    }
+    debugLog.event('classic.api.calendar.shape-summary', {
+      traceId: options.traceId,
+      itemCount: result.items.length,
+      gradebookColumnCount,
+      knownNonGradebookCount,
+      unknownTypeCount,
+      unboundCount,
+      complete: result.complete,
+      errorCount: result.errors.length,
+    });
+    return result;
   }
 
   async attachments(options: ClassicApiCallOptions, courseId: string, contentId: string, query?: CollectionQuery): Promise<PaginatedResult<RawFile>> {

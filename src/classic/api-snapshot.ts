@@ -1,6 +1,7 @@
 import { ClassicApiError, isAuthenticationError, publicApiError, type PublicClassicApiError } from './api-errors.js';
 import type { ClassicApiCallOptions } from './api-contract.js';
 import type { ClassicApiClient } from './api-client.js';
+import { debugLog } from '../debug-log.js';
 import { readContentTree, type ContentTreeResult } from './content-tree.js';
 import type { PaginatedResult } from './pagination.js';
 import type { RichTextOptions } from './rich-text.js';
@@ -159,9 +160,9 @@ function calendarDate(value: unknown, scope: string): string | null {
 
 function calendarCourseId(item: RawCalendarItem): string | null {
   const value = item as RawObject;
-  // `calendarId` identifies the calendar item itself, not its owning course.
+  // `calendarId` identifies calendar context, not a unique event or course.
   // Only an explicit courseId can safely associate a GradebookColumn event
-  // with a task; ordinary calendar entries remain unbound coverage data.
+  // with a task; rows without that binding remain source coverage data.
   return rawId(value, 'courseId') ?? null;
 }
 
@@ -430,6 +431,7 @@ async function readCourse(api: ClassicApiClient, course: SnapshotV2['courses'][n
     columns = { items: [], pages: 0, complete: false, truncated: false, nextPage: null, errors: [publicError] };
   }
   const columnMap = new Map<string, RawGradeColumn>();
+  let notContentLinkedColumnCount = 0;
   for (const column of columns.items) {
     const id = rawColumnId(column);
     if (id) columnMap.set(id, column);
@@ -439,10 +441,17 @@ async function readCourse(api: ClassicApiClient, course: SnapshotV2['courses'][n
       const columnRecord = column as RawObject;
       const columnId = rawColumnId(columnRecord);
       const contentId = rawContentId(columnRecord);
-      if (!columnId || !contentId) {
-        const missing = publicApiError(new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 评分列缺少可验证的 columnId 或 contentId，未生成作业。', { scope: `course:${course.id}:grades`, retryable: false }));
+      if (!columnId) {
+        const missing = publicApiError(new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 评分列缺少可验证的 columnId，未生成作业。', { scope: `course:${course.id}:grades`, retryable: false }));
         gradeErrors.push(missing);
         errors.push(snapshotError(missing, `course:${course.id}:grades`));
+        continue;
+      }
+      if (!contentId) {
+        // contentId is optional for valid manual/calculated/other columns.
+        // Keep the column for coverage and grade-column context, but do not
+        // invent an assignment or infer what this column represents.
+        notContentLinkedColumnCount += 1;
         continue;
       }
       const candidate = addAssignmentFromColumn(column, course.id, context);
@@ -500,6 +509,16 @@ async function readCourse(api: ClassicApiClient, course: SnapshotV2['courses'][n
       errors.push(errorFromNormalization(error, `course:${course.id}:grades`));
     }
   }
+  debugLog.event('classic.api.course.grades-summary', {
+    traceId: options.traceId,
+    courseId: course.id,
+    columnCount: columns.items.length,
+    notContentLinkedColumnCount,
+    gradeItemCount: grades.items.length,
+    gradeErrorCount: gradeErrors.length,
+    columnsComplete: columns.complete,
+    gradesComplete: grades.complete,
+  });
   coverageEntries.push(coverage(course.id, 'grades', grades.items.length + columns.items.length, grades.pages + columns.pages, grades.complete && columns.complete, grades.truncated || columns.truncated, 0, gradeErrors, fetchedAt));
 }
 
