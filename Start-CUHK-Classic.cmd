@@ -12,7 +12,7 @@ if not exist "%~dp0dist\src\dashboard\app.js" goto missing_build
 set "ELECTRON_RUN_AS_NODE="
 set "NODE_OPTIONS="
 set "NODE_PATH="
-"%~dp0node_modules\electron\dist\electron.exe" "%~dp0." --dashboard
+"%~dp0node_modules\electron\dist\electron.exe" "%~dp0."
 exit /b %errorlevel%
 :missing_electron
 echo Electron is missing. Run npm.cmd ci first.

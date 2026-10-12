@@ -14,7 +14,7 @@ const artifacts = await build({ projectDir: root, targets: Platform.MAC.createTa
   mac: { identity: config.identity.replace(/^Developer ID Application: /, ''), type: 'distribution', hardenedRuntime: true,
     notarize: true, entitlements: jitEntitlements, entitlementsInherit: jitEntitlements },
 } });
-const app = join(root, 'release', process.arch === 'arm64' ? 'mac-arm64' : 'mac', 'lms-cli.app');
+const app = join(root, 'release', process.arch === 'arm64' ? 'mac-arm64' : 'mac', `${pkg.build.productName}.app`);
 await verifyMacSignature(app, config.teamId);
 await command('codesign', ['--verify', '--deep', '--strict', app]);
 await command('xcrun', ['stapler', 'validate', app]);

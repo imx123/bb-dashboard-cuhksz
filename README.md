@@ -43,7 +43,13 @@ In PowerShell, use `$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path (Get-Location) '.w
 
 If the Python launcher does not provide the intended independent 3.12 interpreter, use another independently installed 3.10+ interpreter to create the same project-local `.venv`. Keep Playwright browser resources in the project or a temporary workspace directory.
 
-For the CUHK(SZ) Dashboard, use the explicit Classic entry points:
+Version `0.1.0` starts the CUHK(SZ) Dashboard by default, including the packaged desktop app. From a source checkout, the following command rebuilds and launches it:
+
+```bat
+npm.cmd start
+```
+
+`npm.cmd run start:dashboard:fixture` launches the synthetic fixture without a school account. The existing Windows launcher remains available:
 
 ```bat
 Start-CUHK-Classic.cmd

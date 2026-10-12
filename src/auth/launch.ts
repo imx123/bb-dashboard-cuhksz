@@ -40,14 +40,20 @@ function authCommand(profile: Profile, platform: Platform | undefined) {
   const args = ['--profile', profile.id, '--platform', platform ?? 'all', '--from-cli'];
   const configured = process.env.LMS_AUTH_APP;
   const macCandidates = [
+    join(homedir(), 'Applications', 'bb-dashboard-cuhksz.app'),
+    '/Applications/bb-dashboard-cuhksz.app',
     join(homedir(), 'Applications', 'lms-cli.app'),
     '/Applications/lms-cli.app',
   ];
   const winCandidates = process.platform === 'win32' ? [
+    join(process.env.LOCALAPPDATA ?? '', 'Programs', 'bb-dashboard-cuhksz', 'bb-dashboard-cuhksz.exe'),
     join(process.env.LOCALAPPDATA ?? '', 'Programs', 'lms-cli', 'lms-cli.exe'),
     join(process.env.LOCALAPPDATA ?? '', 'lms-cli', 'lms-cli.exe'),
   ] : [];
   const unixCandidates = process.platform === 'linux' ? [
+    join(homedir(), '.local', 'share', 'bb-dashboard-cuhksz', 'bb-dashboard-cuhksz'),
+    '/usr/local/bin/bb-dashboard-cuhksz',
+    '/usr/bin/bb-dashboard-cuhksz',
     join(homedir(), '.local', 'share', 'lms-cli', 'lms-cli'),
     '/usr/local/bin/lms-cli',
     '/usr/bin/lms-cli',

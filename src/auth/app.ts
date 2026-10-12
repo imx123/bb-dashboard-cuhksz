@@ -313,8 +313,4 @@ async function boot() {
     void start(initial.id, selection).catch(() => { message = '未能打开已保存的登录，请点击开始登录重试。'; void push(); });
 }
 
-if (process.argv.includes('--dashboard')) {
-  void import('../dashboard/app.js').then(module => module.startDashboard()).catch(() => { app.exit(1); });
-} else {
-  void boot().catch(() => { app.exit(1); });
-}
+void boot().catch(() => { app.exit(1); });

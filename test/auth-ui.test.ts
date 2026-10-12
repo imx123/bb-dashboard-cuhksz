@@ -20,13 +20,15 @@ test('authorization page uses the lms-cli brand, school selection and a fresh CS
   assert.notEqual(html, authorizationHTML(), 'Each page must receive a fresh script nonce');
 });
 
-test('plugin, package and marketplace consistently use lms-cli with neutral icons', async () => {
+test('retained CLI plugin keeps neutral icons while the root package identifies the CUHK(SZ) Dashboard', async () => {
   const manifest = JSON.parse(await readFile(new URL('../plugins/lms-cli/.codex-plugin/plugin.json', import.meta.url), 'utf8'));
   for (const slot of ['composerIcon', 'logo', 'logoDark']) assert.equal(manifest.interface[slot], './assets/lms-icon.png');
   assert.equal(manifest.interface.displayName, 'lms-cli');
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const market = JSON.parse(await readFile(new URL('../.agents/plugins/marketplace.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.name, 'lms-cli'); assert.equal(pkg.build.productName, 'lms-cli');
+  assert.equal(pkg.name, 'bb-dashboard-cuhksz'); assert.equal(pkg.build.productName, 'bb-dashboard-cuhksz');
+  assert.equal(pkg.main, 'dist/src/dashboard/main.js');
+  assert.equal(pkg.bin, undefined); assert.equal(pkg.scripts['auth:app'], undefined);
   assert.equal(market.name, 'lms-cli'); assert.equal(market.interface.displayName, 'lms-cli');
   assert.equal(manifest.version, pkg.version);
   const png = await readFile(new URL('../plugins/lms-cli/assets/lms-icon.png', import.meta.url));

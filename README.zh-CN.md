@@ -43,7 +43,13 @@ sidecar\bb-mcp\.venv\Scripts\python.exe -m playwright install chromium
 
 如果 Python launcher 没有目标独立 3.12，请使用另一个独立安装的 3.10+ 解释器创建同一路径的项目 venv。Playwright 浏览器资源应保存在项目目录或临时工作区，不要改全局浏览器配置。
 
-CUHK(SZ) Dashboard 使用以下入口：
+`0.1.0` 默认打开 CUHK(SZ) Dashboard，打包后的桌面应用也使用此入口。在源码目录中执行以下命令会先构建再启动：
+
+```bat
+npm.cmd start
+```
+
+`npm.cmd run start:dashboard:fixture` 启动不需要学校账号的合成演示。原 Windows 启动脚本仍可使用：
 
 ```bat
 Start-CUHK-Classic.cmd
