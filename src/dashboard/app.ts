@@ -251,6 +251,7 @@ function offlineProvider(origin: string, profileId: string): ClassicApiProvider 
     state: 'authenticated', account, generation: 1,
     beginLogin: async () => ({ state: 'authenticated', account, generation: 1 }),
     completeLogin: async () => ({ state: 'authenticated', account, generation: 1 }),
+    restore: async () => ({ state: 'authenticated', account, generation: 1 }),
     ensureAuthenticated: async () => ({ state: 'authenticated', account, generation: 1 }),
     cookiesFor: async () => [],
     applySetCookie: async () => {},
@@ -264,6 +265,7 @@ function offlineProvider(origin: string, profileId: string): ClassicApiProvider 
     status: async () => ({ ok: !closed, session: { state: closed ? 'unauthenticated' as const : 'authenticated' as const, account: closed ? null : account, generation: 1 } }),
     beginLogin: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
     completeLogin: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
+    restore: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
     load: async () => structuredClone(fixture),
     detail: async (assignment: AssignmentV2) => ({ state: 'unsupported' as const, assignment, content: null, attachments: assignment.attachments, errors: [] }),
     cancel: () => {},
@@ -319,6 +321,8 @@ export async function startDashboard(options: DashboardOptions = {}) {
   let activeCompletionScope: CompletionScopeV2 | undefined;
   let loading: Promise<unknown> | undefined;
   let loadController: AbortController | undefined;
+  let restoring: Promise<Record<string, unknown>> | undefined;
+  let restoreController: AbortController | undefined;
   let detailController: AbortController | undefined;
   let migration: { plan: CompletionMigrationPlan; legacy: LegacyCompletionScope; scope: CompletionScopeV2; accountKey: string } | undefined;
   const completionStore = new CompletionStoreV2();
@@ -329,6 +333,7 @@ export async function startDashboard(options: DashboardOptions = {}) {
 
   const abortActiveOperations = (reason: ClassicApiError) => {
     loadController?.abort(reason);
+    restoreController?.abort(reason);
     detailController?.abort(reason);
     for (const controller of resourceControllers) controller.abort(reason);
     provider.cancel();
@@ -489,6 +494,28 @@ export async function startDashboard(options: DashboardOptions = {}) {
     });
   };
 
+  handle('cuhk:restore', async () => {
+    if (restoring) return restoring;
+    const controller = new AbortController();
+    restoreController = controller;
+    const run = (async (): Promise<Record<string, unknown>> => {
+      refreshAccountBoundary();
+      try {
+        const snapshot = await provider.restore(controller.signal, currentTraceId());
+        refreshAccountBoundary();
+        return publicLoginResult(snapshot);
+      } catch (error) {
+        refreshAccountBoundary();
+        return { ok: false, state: session.state, account: safeAccount(session), error: publicApiError(error) };
+      }
+    })();
+    restoring = run;
+    try { return await run; }
+    finally {
+      if (restoring === run) restoring = undefined;
+      if (restoreController === controller) restoreController = undefined;
+    }
+  });
   handle('cuhk:status', async () => {
     const result = await provider.status(new AbortController().signal, currentTraceId());
     refreshAccountBoundary();

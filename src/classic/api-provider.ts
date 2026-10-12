@@ -166,6 +166,10 @@ export class ClassicApiProvider {
     return this.session.completeLogin(signal, traceId);
   }
 
+  async restore(signal?: AbortSignal, traceId?: string): Promise<ClassicSessionSnapshot> {
+    return this.session.restore(signal, traceId);
+  }
+
   async load(signal = new AbortController().signal, traceId?: string): Promise<SnapshotV2> {
     if (this.activeLoad) {
       const account = this.session.account;

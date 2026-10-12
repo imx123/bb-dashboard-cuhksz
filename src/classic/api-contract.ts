@@ -40,6 +40,7 @@ export interface ClassicSession {
   readonly generation: number;
   beginLogin(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   completeLogin(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
+  restore(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   ensureAuthenticated(signal: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   cookiesFor(url: URL, signal?: AbortSignal): Promise<readonly ClassicCookie[]>;
   applySetCookie(url: URL, values: readonly string[], signal?: AbortSignal): Promise<void>;

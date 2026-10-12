@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('cuhk', {
   status: () => ipcRenderer.invoke('cuhk:status'),
   cancel: () => ipcRenderer.invoke('cuhk:cancel'),
   close: () => ipcRenderer.invoke('cuhk:close'),
+  restore: () => ipcRenderer.invoke('cuhk:restore'),
   complete: (key: string, value: boolean | null) => ipcRenderer.invoke('cuhk:complete', key, value),
   setDueOverride: (target: { courseId: string; id: string }, value: string | null) => ipcRenderer.invoke('cuhk:due-override', target, value),
   markAnnouncementSeen: (target: { courseId: string; id: string }, value: boolean) => ipcRenderer.invoke('cuhk:announcement-seen', target, value),

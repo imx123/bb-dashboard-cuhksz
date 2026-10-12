@@ -20,6 +20,7 @@ import { ClassicHttpClient } from './http.js';
 import { createClassicLoginWindow, type ClassicLoginController } from './login.js';
 
 const API_ORIGIN = 'https://bb.cuhk.edu.cn' as ClassicApiOrigin;
+const LOGIN_AUTH_ORIGINS = ['https://sts.cuhk.edu.cn'] as const;
 const IDENTITY_PATH = '/learn/api/v1/users/me';
 const MEMBERSHIPS_PATH = '/learn/api/v1/users/me/memberships?expand=course&limit=100';
 const COOKIE_VALUE_LIMIT = 16_384;
@@ -186,7 +187,7 @@ export class ClassicSession implements ClassicSessionContract {
     if (originOf(origin) !== API_ORIGIN) throw new ClassicApiError('URL_REJECTED', 'Classic API origin 不匹配。', { scope: 'session.origin', retryable: false });
     this.profileId = profileId;
     this.partition = options.partition ?? partitionFor(profileId);
-    this.allowedLoginOrigins = new Set(options.allowedLoginOrigins ?? []);
+    this.allowedLoginOrigins = new Set([...LOGIN_AUTH_ORIGINS, ...(options.allowedLoginOrigins ?? [])]);
     this.electronSession = electronSession.fromPartition(this.partition);
     this.electronSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     this.electronSession.setPermissionCheckHandler(() => false);
@@ -283,6 +284,20 @@ export class ClassicSession implements ClassicSessionContract {
     return this.startAuthFlight(signal, traceId, true);
   }
 
+  async restore(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot> {
+    abortIfNeeded(signal, 'session.restore');
+    if (this.closed) throw new ClassicApiError('AUTH_REQUIRED', 'Classic session 已关闭，请重新打开登录。', { scope: 'session.restore', retryable: false });
+    if (this.stateValue === 'authenticating' && this.loginController && !this.loginController.closed) return this.snapshot();
+    if (this.stateValue === 'authenticated' && this.accountValue && Date.now() - this.authenticatedAt < AUTH_CACHE_MS) return this.snapshot();
+    if (this.authFlight) return this.authFlight;
+    // Cookie presence at the partition root is not an authentication signal:
+    // valid Blackboard cookies may be scoped to /learn. Always verify the
+    // identity endpoint so the server remains the authority on session state.
+    this.stateValue = 'authenticating';
+    debugLog.event('classic.api.session.restore.begin', { traceId, origin: this.origin });
+    return this.startAuthFlight(signal, traceId, false);
+  }
+
   async ensureAuthenticated(signal: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot> {
     abortIfNeeded(signal, 'session.auth');
     if (this.stateValue === 'unauthenticated') {
@@ -341,6 +356,7 @@ export class ClassicSession implements ClassicSessionContract {
       if (!Array.isArray(membershipBody.results)) {
         throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard memberships 响应缺少结果数组。', { scope: 'session.memberships' });
       }
+      abortIfNeeded(requestSignal, 'session.identity');
       this.accountValue = {
         profileId: this.profileId,
         origin: this.origin,
@@ -351,6 +367,9 @@ export class ClassicSession implements ClassicSessionContract {
       this.stateValue = 'authenticated';
       this.authenticatedAt = Date.now();
       debugLog.event('classic.api.session.authenticated', { traceId, elapsedMs: Date.now() - started, fromLogin, membershipCount: membershipBody.results.length });
+      await this.flushCookieStore(fromLogin ? 'login' : 'restore');
+      abortIfNeeded(requestSignal, 'session.identity');
+      if (!this.isGenerationCurrent(generationAtStart)) throw new ClassicApiError('AUTH_REQUIRED', 'Classic 会话已改变，请重新读取。', { scope: 'session.identity', retryable: false });
       return this.snapshot();
     } catch (error) {
       if (!this.isGenerationCurrent(generationAtStart)) throw error;
@@ -441,7 +460,17 @@ export class ClassicSession implements ClassicSessionContract {
     this.advance('unauthenticated');
     await this.loginController?.close().catch(() => {});
     this.loginController = undefined;
+    await this.flushCookieStore('close');
     debugLog.event('classic.api.session.closed', { generation: this.generationValue });
+  }
+
+  private async flushCookieStore(reason: 'login' | 'restore' | 'close'): Promise<void> {
+    try {
+      await this.electronSession.cookies.flushStore();
+      debugLog.event('classic.api.session.cookies.flushed', { reason });
+    } catch (error) {
+      debugLog.error('classic.api.session.cookies.flush-error', error, { reason });
+    }
   }
 
   private async refreshFromElectron(signal: AbortSignal, expectedGeneration?: number): Promise<void> {
