@@ -8,13 +8,6 @@ import { createRequestBudget, paginateCollection } from '../src/classic/paginati
 import { deriveSubmissionSummary } from '../src/classic/submissions.js';
 import { ClassicSnapshotV2Cache, mergeSnapshotV2WithCache, type ClassicProtectedCacheStore, type CacheFile } from '../src/classic/cache-v2.js';
 import { emptyRichBody, emptySubmissionSummary, SnapshotV2Schema, type AssignmentV2, type SnapshotV2 } from '../src/classic/schema-v2.js';
-import {
-  applyCompletionMigration,
-  completionKeyV2,
-  legacyCompletionKey,
-  planCompletionMigration,
-  type CompletionFileV2,
-} from '../src/classic/completion-migration.js';
 
 function response<T>(url: URL, data: T): ClassicApiResponse<T> {
   return { status: 200, url, headers: {}, data, bytes: 0 };
@@ -149,42 +142,4 @@ test('代次切换时 cache guard 拒绝旧结果写入', async () => {
   );
   generation = 1;
   assert.equal(store.value, null);
-});
-
-test('迁移只应用显式候选且 existing=false 优先于旧 true', () => {
-  const legacyTask = {
-    courseId: '_123456_1',
-    id: 'legacy-assignment-1',
-    title: '旧作业',
-    dueAt: '2026-10-20T12:00:00+08:00',
-    dueDateOnly: null,
-    url: 'https://bb.cuhk.edu.cn/webapps/assessment/do?course_id=_123456_1&id=1',
-  };
-  const currentTask = {
-    courseId: '_123456_1',
-    contentId: 'content-1',
-    id: 'new-grade-1',
-    columnId: 'column-1',
-    title: '新作业',
-    dueAt: legacyTask.dueAt,
-    dueDateOnly: null,
-    url: legacyTask.url,
-  };
-  const legacyTask2 = { ...legacyTask, id: 'legacy-assignment-2', title: '旧作业二', url: 'https://bb.cuhk.edu.cn/webapps/assessment/do?course_id=_123456_1&id=2' };
-  const currentTask2 = { ...currentTask, contentId: 'content-2', id: 'new-grade-2', columnId: 'column-2', title: '新作业二', url: legacyTask2.url };
-  const legacyKey = legacyCompletionKey(legacyTask);
-  const legacyKey2 = legacyCompletionKey(legacyTask2);
-  const newKey = completionKeyV2(currentTask);
-  const newKey2 = completionKeyV2(currentTask2);
-  const current = { profileId: 'cuhksz', origin: CLASSIC_API_ORIGIN, userId: '_user_1', source: 'live' as const };
-  const legacy = { scopeKey: 'synthetic-legacy', marks: { [legacyKey]: true, [legacyKey2]: true }, boundUserId: null, taskMetadata: { [legacyKey]: legacyTask, [legacyKey2]: legacyTask2 } };
-  const plan = planCompletionMigration({ legacy, current, tasks: [currentTask, currentTask2] });
-  assert.equal(plan.candidates[0]?.newKey, newKey);
-  assert.equal(plan.candidates[1]?.newKey, newKey2);
-  const file: CompletionFileV2 = { version: 2, marks: { [newKey]: { key: newKey, completed: false, createdAt: '2026-10-01T00:00:00+08:00', updatedAt: '2026-10-01T00:00:00+08:00', source: 'local', legacyKey: null } } };
-  const migrated = applyCompletionMigration({ file, plan, legacy, confirmAccount: true, confirmedUserId: current.userId, selections: [{ legacyKey, newKey }] });
-  assert.equal(migrated.marks[newKey]?.completed, false);
-  assert.equal(migrated.marks[newKey2], undefined);
-  const noSelection = applyCompletionMigration({ file: { version: 2, marks: {} }, plan, legacy, confirmAccount: true, confirmedUserId: current.userId, selections: [] });
-  assert.deepEqual(noSelection.marks, {});
 });

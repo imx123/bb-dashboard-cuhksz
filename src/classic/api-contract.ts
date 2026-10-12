@@ -17,11 +17,19 @@ export interface ClassicAccountContext {
 
 export type ClassicSessionState = 'unauthenticated' | 'authenticating' | 'authenticated' | 'expired' | 'unknown';
 
+export type ClassicRecoveryStage = 'challenge';
+
+export interface ClassicRecoveryInfo {
+  readonly stage: ClassicRecoveryStage;
+  readonly challenge: boolean;
+}
+
 export interface ClassicSessionSnapshot {
   readonly state: ClassicSessionState;
   readonly account: ClassicAccountContext | null;
   readonly generation: number;
   readonly errorCode?: ClassicApiErrorCode;
+  readonly recovery?: ClassicRecoveryInfo;
 }
 
 /** Internal cookie metadata. It must never cross the renderer/MCP boundary. */
@@ -40,7 +48,9 @@ export interface ClassicSession {
   readonly generation: number;
   beginLogin(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   completeLogin(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
+  cancelLogin(): Promise<void>;
   restore(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
+  restoreWithSso(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   ensureAuthenticated(signal: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot>;
   cookiesFor(url: URL, signal?: AbortSignal): Promise<readonly ClassicCookie[]>;
   applySetCookie(url: URL, values: readonly string[], signal?: AbortSignal): Promise<void>;

@@ -4,15 +4,14 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { atomicWrite, getProfile, initProfile, locked, stateHome, type Profile } from '../config.js';
 import { LmsError, publicError } from '../errors.js';
-import { CompletionStore as LegacyCompletionStore, completionScope } from './completion-store.js';
+import { completionScope } from './completion-store.js';
 import { classicDashboardHTML } from './classic-ui.js';
 import { ClassicApiProvider, type ClassicOfflineSnapshot } from '../classic/api-provider.js';
 import { ClassicApiError, publicApiError } from '../classic/api-errors.js';
-import { ClassicSnapshotCache } from '../classic/cache.js';
 import { ClassicHttpClient } from '../classic/http.js';
 import { ClassicSession } from '../classic/session.js';
 import { ClassicResourceRegistry } from '../classic/resource.js';
-import { CompletionStoreV2, completionKeyV2, legacyCompletionKey, planCompletionMigration, type CompletionMigrationPlan, type CompletionScopeV2, type LegacyCompletionScope } from '../classic/completion-migration.js';
+import { CompletionStoreV2, completionKeyV2, type CompletionScopeV2 } from '../classic/completion-migration.js';
 import { requireClassicUrl } from '../classic/url-policy.js';
 import { createTraceId, currentTraceId, debugLog, debugLogDirectory, runWithTrace } from '../debug-log.js';
 import type { AnnouncementV2, AssignmentV2, SnapshotV2 } from '../classic/schema-v2.js';
@@ -267,7 +266,9 @@ function offlineProvider(origin: string, profileId: string): ClassicApiProvider 
     state: 'authenticated', account, generation: 1,
     beginLogin: async () => ({ state: 'authenticated', account, generation: 1 }),
     completeLogin: async () => ({ state: 'authenticated', account, generation: 1 }),
+    cancelLogin: async () => {},
     restore: async () => ({ state: 'authenticated', account, generation: 1 }),
+    restoreWithSso: async () => ({ state: 'authenticated', account, generation: 1 }),
     ensureAuthenticated: async () => ({ state: 'authenticated', account, generation: 1 }),
     cookiesFor: async () => [],
     applySetCookie: async () => {},
@@ -282,6 +283,7 @@ function offlineProvider(origin: string, profileId: string): ClassicApiProvider 
     beginLogin: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
     completeLogin: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
     restore: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
+    restoreWithSso: async () => ({ state: 'authenticated' as const, account, generation: 1 }),
     load: async () => structuredClone(fixture),
     detail: async (assignment: AssignmentV2) => ({ state: 'unsupported' as const, assignment, content: null, attachments: assignment.attachments, errors: [] }),
     cancel: () => {},
@@ -340,16 +342,13 @@ export async function startDashboard(options: DashboardOptions = {}) {
   let restoring: Promise<Record<string, unknown>> | undefined;
   let restoreController: AbortController | undefined;
   let detailController: AbortController | undefined;
-  let migration: { plan: CompletionMigrationPlan; legacy: LegacyCompletionScope; scope: CompletionScopeV2; accountKey: string } | undefined;
   const completionStore = new CompletionStoreV2();
-  const legacyCompletionStore = new LegacyCompletionStore();
-  const legacySnapshotCache = new ClassicSnapshotCache();
   const resourceControllers = new Set<AbortController>();
   const session = provider.session;
 
-  const abortActiveOperations = (reason: ClassicApiError) => {
+  const abortActiveOperations = (reason: ClassicApiError, includeRestore = true) => {
     loadController?.abort(reason);
-    restoreController?.abort(reason);
+    if (includeRestore) restoreController?.abort(reason);
     detailController?.abort(reason);
     for (const controller of resourceControllers) controller.abort(reason);
     provider.cancel();
@@ -360,14 +359,13 @@ export async function startDashboard(options: DashboardOptions = {}) {
     visibleKeys = new Set<string>();
     manualMarksAvailable = false;
     activeCompletionScope = undefined;
-    migration = undefined;
   };
   let lastAccountKey = accountKey(session);
   let confirmedAccountKey: string | null = lastAccountKey;
-  const refreshAccountBoundary = () => {
+  const refreshAccountBoundary = (includeRestore = true) => {
     const next = accountKey(session);
     if (next !== lastAccountKey) {
-      abortActiveOperations(new ClassicApiError('SESSION_EXPIRED', '登录会话已变化，旧操作已取消。', { scope: 'dashboard.account.changed', retryable: false }));
+      abortActiveOperations(new ClassicApiError('SESSION_EXPIRED', '登录会话已变化，旧操作已取消。', { scope: 'dashboard.account.changed', retryable: false }), includeRestore);
       clearAccountBoundState();
       for (const sourceWindow of sourceWindows) if (!sourceWindow.isDestroyed()) sourceWindow.close();
       sourceWindows.clear();
@@ -447,6 +445,36 @@ export async function startDashboard(options: DashboardOptions = {}) {
       ...(options.cachedAt ? { cachedAt: options.cachedAt } : {}),
       ...(localErrors.length ? { localErrors } : {}),
     };
+  };
+
+  type OfflineDisplay = {
+    readonly snapshot?: UiSnapshot;
+    readonly cachedAt?: string;
+    readonly cacheError?: { readonly code: string; readonly scope: string };
+  };
+  const loadOfflineDisplay = async (controller: AbortController, days: 7 | 14 | 30, originalError: unknown, challenge = false): Promise<OfflineDisplay> => {
+    if (source !== 'live' || confirmedAccountKey !== null || accountKey(session) !== null || controller.signal.aborted) return {};
+    const original = publicApiError(originalError);
+    try {
+      const cached: ClassicOfflineSnapshot | undefined = await provider.loadOffline(controller.signal, currentTraceId());
+      if (!cached || controller.signal.aborted || confirmedAccountKey !== null || accountKey(session) !== null) return {};
+      const decorated = await decorate(cached.snapshot, days, {
+        offlineCache: true,
+        readOnly: true,
+        cachedAt: cached.cachedAt,
+        cacheIdentity: cached.identity,
+      });
+      if (controller.signal.aborted || confirmedAccountKey !== null || accountKey(session) !== null) return {};
+      debugLog.event('dashboard.cache.offline-fallback', { hit: true, stale: true, source, originalCode: original.code, offlineReason: offlineFallbackReason(originalError), ...(challenge ? { challenge: true } : {}) });
+      return { snapshot: decorated, cachedAt: cached.cachedAt };
+    } catch (offlineError) {
+      const cachePublic = publicApiError(offlineError);
+      if (controller.signal.aborted) return {};
+      debugLog.error('dashboard.cache.offline-fallback-error', offlineError, { source, originalCode: original.code, cacheCode: cachePublic.code, ...(challenge ? { challenge: true } : {}) });
+      if (cachePublic.code !== 'CACHE_FALLBACK') return {};
+      const scope = typeof cachePublic.scope === 'string' ? cachePublic.scope.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : '';
+      return { cacheError: { code: cachePublic.code, scope: scope || 'cache-v2.read' } };
+    }
   };
 
   const sourceUrlFor = (snapshot: SnapshotV2, target: SourceTarget): string => {
@@ -542,21 +570,31 @@ export async function startDashboard(options: DashboardOptions = {}) {
     });
   };
 
-  handle('cuhk:restore', async (allowOffline: unknown = false, days: unknown = 7) => {
+  handle('cuhk:restore', async (allowOffline: unknown = false, days: unknown = 7, allowSso: unknown = false) => {
     if (allowOffline !== true && allowOffline !== false) throw new LmsError('BAD_INPUT', '会话恢复参数无效。');
     if (days !== 7 && days !== 14 && days !== 30) throw new LmsError('BAD_INPUT', '请选择 7、14 或 30 天。');
+    if (allowSso !== true && allowSso !== false) throw new LmsError('BAD_INPUT', '单点登录恢复参数无效。');
     if (restoring) return restoring;
     const controller = new AbortController();
     restoreController = controller;
     const run = (async (): Promise<Record<string, unknown>> => {
-      refreshAccountBoundary();
+      refreshAccountBoundary(false);
       try {
-        const snapshot = await provider.restore(controller.signal, currentTraceId());
-        refreshAccountBoundary();
+        const snapshot = allowSso
+          ? await provider.restoreWithSso(controller.signal, currentTraceId())
+          : await provider.restore(controller.signal, currentTraceId());
+        refreshAccountBoundary(false);
         if (snapshot.state === 'authenticated' && snapshot.account) confirmedAccountKey = accountKey(session);
+        if (snapshot.recovery?.challenge && allowOffline === true) {
+          const originalError = snapshot.errorCode
+            ? new ClassicApiError(snapshot.errorCode, 'Blackboard 会话尚未确认。', { scope: 'dashboard.restore.challenge', retryable: false })
+            : new ClassicApiError('SESSION_EXPIRED', 'Blackboard 会话尚未确认。', { scope: 'dashboard.restore.challenge', retryable: false });
+          const offline = await loadOfflineDisplay(controller, days as 7 | 14 | 30, originalError, true);
+          return { ...publicLoginResult(snapshot), ...(offline.snapshot ? { offlineCache: true, readOnly: true, cachedAt: offline.cachedAt, offlineReason: offlineFallbackReason(originalError), snapshot: offline.snapshot } : {}), ...(offline.cacheError ? { cacheError: offline.cacheError } : {}) };
+        }
         return publicLoginResult(snapshot);
       } catch (error) {
-        refreshAccountBoundary();
+        refreshAccountBoundary(false);
         const canFallback = allowOffline === true
           && source === 'live'
           && confirmedAccountKey === null
@@ -565,28 +603,9 @@ export async function startDashboard(options: DashboardOptions = {}) {
           && offlineFallbackAllowed(error);
         let cacheError: { readonly code: string; readonly scope: string } | undefined;
         if (canFallback) {
-          try {
-            const cached: ClassicOfflineSnapshot | undefined = await provider.loadOffline(controller.signal, currentTraceId());
-            if (cached && !controller.signal.aborted && confirmedAccountKey === null && accountKey(session) === null) {
-              const decorated = await decorate(cached.snapshot, days as 7 | 14 | 30, {
-                offlineCache: true,
-                readOnly: true,
-                cachedAt: cached.cachedAt,
-                cacheIdentity: cached.identity,
-              });
-              if (controller.signal.aborted || confirmedAccountKey !== null || accountKey(session) !== null) throw new ClassicApiError('TIMEOUT', '离线缓存读取已取消。', { scope: 'dashboard.cache.offline.cancel', retryable: false });
-              const originalCode = publicApiError(error).code;
-              debugLog.event('dashboard.cache.offline-fallback', { hit: true, stale: true, source, originalCode, offlineReason: offlineFallbackReason(error) });
-              return { ok: true, state: 'offline', account: null, generation: session.generation, offlineCache: true, readOnly: true, cachedAt: cached.cachedAt, offlineReason: offlineFallbackReason(error), snapshot: decorated };
-            }
-          } catch (offlineError) {
-            const cachePublic = publicApiError(offlineError);
-            if (!controller.signal.aborted && cachePublic.code === 'CACHE_FALLBACK') {
-              const scope = typeof cachePublic.scope === 'string' ? cachePublic.scope.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : '';
-              cacheError = { code: cachePublic.code, scope: scope || 'cache-v2.read' };
-            }
-            debugLog.error('dashboard.cache.offline-fallback-error', offlineError, { source, originalCode: publicApiError(error).code, cacheCode: cachePublic.code });
-          }
+          const offline = await loadOfflineDisplay(controller, days as 7 | 14 | 30, error);
+          if (offline.snapshot) return { ok: true, state: 'offline', account: null, generation: session.generation, offlineCache: true, readOnly: true, cachedAt: offline.cachedAt, offlineReason: offlineFallbackReason(error), snapshot: offline.snapshot };
+          cacheError = offline.cacheError;
         }
         return { ok: false, state: session.state, account: safeAccount(session), error: publicApiError(error), ...(cacheError ? { cacheError } : {}) };
       }
@@ -624,9 +643,11 @@ export async function startDashboard(options: DashboardOptions = {}) {
     try { return await loading; }
     finally { if (loadController === controller) loadController = undefined; loading = undefined; }
   });
-  handle('cuhk:cancel', async () => {
+  handle('cuhk:cancel', async (cancelLogin: unknown = false) => {
+    if (cancelLogin !== true && cancelLogin !== false) throw new LmsError('BAD_INPUT', '取消参数无效。');
     const reason = new ClassicApiError('TIMEOUT', 'Classic 同步已取消。', { scope: 'dashboard.cancel', retryable: false });
     abortActiveOperations(reason);
+    if (cancelLogin) await session.cancelLogin();
     return { ok: true };
   });
   handle('cuhk:login', async (action: unknown = 'begin') => {
@@ -754,57 +775,6 @@ export async function startDashboard(options: DashboardOptions = {}) {
     return { ok: true, course: snapshot.courses.find(item => item.id === id) ?? null, files: resource === 'files' ? snapshot.files.filter(file => file.courseId === id) : [] };
   });
 
-  handle('cuhk:migration-preview', async () => {
-    refreshAccountBoundary();
-    const snapshot = lastSnapshot;
-    const account = safeAccount(session);
-    if (!snapshot || !account) throw new ClassicApiError('AUTH_REQUIRED', '请先读取当前账号后再预览完成标记迁移。', { scope: 'dashboard.migration', retryable: false });
-    const startAccountKey = accountKey(session);
-    const modeScope = source === 'offline-fixture' ? 'offline-fixture' : 'local-account';
-    const legacyScope = completionScope(profile.id, `${origin}|${modeScope}`, modeScope);
-    let marks: Readonly<Record<string, boolean>>;
-    try { marks = await legacyCompletionStore.load(legacyScope); }
-    catch { throw new ClassicApiError('CACHE_FALLBACK', '旧完成标记无法读取，原文件未覆盖。', { scope: 'dashboard.migration.read', stale: true, retryable: false }); }
-    if (accountKey(session) !== startAccountKey) throw new ClassicApiError('SESSION_EXPIRED', '登录会话在迁移预览期间发生变化。', { scope: 'dashboard.migration.generation', retryable: false });
-    const legacySnapshotScope = `${profile.id}|${origin}|${source}`;
-    const taskMetadata: Record<string, { courseId: string; id: string; title: string; dueAt: string | null; dueDateOnly: string | null; url: string | null }> = {};
-    try {
-      const oldSnapshot = await legacySnapshotCache.read(legacySnapshotScope);
-      if (oldSnapshot) {
-        for (const task of oldSnapshot.assignments) {
-          const metadata = { courseId: task.courseId, id: task.id, title: task.title, dueAt: task.dueAt, dueDateOnly: task.dueDateOnly, url: task.url };
-          taskMetadata[legacyCompletionKey(metadata)] = metadata;
-        }
-      }
-    } catch {
-      throw new ClassicApiError('CACHE_FALLBACK', '旧 Classic 快照无法读取，原文件已保留。', { scope: 'dashboard.migration.snapshot-read', stale: true, retryable: false });
-    }
-    if (accountKey(session) !== startAccountKey) throw new ClassicApiError('SESSION_EXPIRED', '登录会话在迁移预览期间发生变化。', { scope: 'dashboard.migration.generation', retryable: false });
-    const legacy: LegacyCompletionScope = { scopeKey: legacyScope, marks, boundUserId: null, taskMetadata };
-    const current = completionScopeForAccount();
-    const plan = planCompletionMigration({ legacy, current, tasks: snapshot.assignments });
-    migration = { plan, legacy, scope: current, accountKey: accountKey(session)! };
-    return { ok: true, plan };
-  });
-  handle('cuhk:migration-confirm', async (migrationId: unknown, confirmAccount: unknown, selections: unknown = []) => {
-    refreshAccountBoundary();
-    const account = safeAccount(session);
-    if (!account || !migration || migration.accountKey !== accountKey(session) || migration.plan.migrationId !== migrationId) throw new ClassicApiError('BAD_INPUT', '迁移预览已失效，请重新生成预览。', { scope: 'dashboard.migration', retryable: false });
-    if (typeof confirmAccount !== 'boolean') throw new ClassicApiError('BAD_INPUT', '请明确确认旧标记属于当前 Blackboard 账号。', { scope: 'dashboard.migration', retryable: false });
-    if (!Array.isArray(selections) || selections.length > 500 || selections.some(item => !item || typeof item !== 'object' || Array.isArray(item) || typeof (item as Record<string, unknown>).legacyKey !== 'string' || typeof (item as Record<string, unknown>).newKey !== 'string')) throw new ClassicApiError('BAD_INPUT', '迁移选择无效。', { scope: 'dashboard.migration', retryable: false });
-    const selected = (selections as Array<Record<string, unknown>>).map(item => ({ legacyKey: String(item.legacyKey).slice(0, 500), newKey: String(item.newKey).slice(0, 100) }));
-    const startAccountKey = accountKey(session);
-    const result = await completionStore.migrate(migration.scope, {
-      plan: migration.plan,
-      legacy: migration.legacy,
-      confirmAccount,
-      confirmedUserId: confirmAccount ? account.userId : undefined,
-      selections: selected,
-    }, { legacySourcePath: join(stateHome(), 'dashboard-completion.json') });
-    if (accountKey(session) !== startAccountKey) throw new ClassicApiError('SESSION_EXPIRED', '登录会话在迁移写入期间发生变化，结果已隔离在原账号 scope。', { scope: 'dashboard.migration.generation', retryable: false });
-    migration = undefined;
-    return { ok: true, ...result };
-  });
   handle('cuhk:debug-event', async (eventName: unknown, details: unknown = {}) => {
     if (typeof eventName !== 'string' || !/^[a-z][a-z0-9._-]{0,80}$/i.test(eventName)) throw new LmsError('BAD_INPUT', '诊断事件名称无效。');
     debugLog.event('renderer.event', { eventName, ...rendererEventDetails(eventName, details) });

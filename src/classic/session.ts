@@ -25,6 +25,11 @@ const IDENTITY_PATH = '/learn/api/v1/users/me';
 const MEMBERSHIPS_PATH = '/learn/api/v1/users/me/memberships?expand=course&limit=100';
 const COOKIE_VALUE_LIMIT = 16_384;
 const AUTH_CACHE_MS = 30_000;
+const SSO_RECOVERY_TIMEOUT_MS = 30_000;
+
+function ssoRecoveryTimeoutError(): ClassicApiError {
+  return new ClassicApiError('TIMEOUT', 'Blackboard 官方单点登录未完成，请重试。', { scope: 'session.restore.sso', retryable: true });
+}
 
 type RecordValue = Record<string, unknown>;
 type SessionCookie = ClassicCookie & {
@@ -177,6 +182,7 @@ export class ClassicSession implements ClassicSessionContract {
   private generationValue = 0;
   private loginController?: ClassicLoginController;
   private authFlight?: Promise<ClassicSessionSnapshot>;
+  private restoreFlight?: Promise<ClassicSessionSnapshot>;
   private authenticatedAt = 0;
   private readonly requestControllers = new Set<AbortController>();
   private closed = false;
@@ -198,12 +204,13 @@ export class ClassicSession implements ClassicSessionContract {
   get account() { return this.accountValue; }
   get generation() { return this.generationValue; }
 
-  private snapshot(errorCode?: ClassicApiErrorCode): ClassicSessionSnapshot {
+  private snapshot(errorCode?: ClassicApiErrorCode, recovery?: ClassicSessionSnapshot['recovery']): ClassicSessionSnapshot {
     return {
       state: this.stateValue,
       account: this.accountValue,
       generation: this.generationValue,
       ...(errorCode ? { errorCode } : {}),
+      ...(recovery ? { recovery } : {}),
     };
   }
 
@@ -247,7 +254,7 @@ export class ClassicSession implements ClassicSessionContract {
     abortIfNeeded(signal, 'session.login');
     if (this.closed) throw new ClassicApiError('AUTH_REQUIRED', 'Classic session 已关闭，请重新打开登录。', { scope: 'session.login', retryable: false });
     if (this.stateValue === 'authenticating' && this.loginController && !this.loginController.closed) {
-      this.loginController.window.focus();
+      this.loginController.focus();
       return this.snapshot();
     }
     const previousController = this.loginController;
@@ -281,7 +288,23 @@ export class ClassicSession implements ClassicSessionContract {
     if (this.closed) throw new ClassicApiError('AUTH_REQUIRED', 'Classic session 已关闭，请重新打开登录。', { scope: 'session.login', retryable: false });
     if (this.stateValue !== 'authenticating' && this.stateValue !== 'authenticated') this.advance('authenticating');
     if (this.authFlight) return this.authFlight;
-    return this.startAuthFlight(signal, traceId, true);
+    const result = await this.startAuthFlight(signal, traceId, true);
+    const controller = this.loginController;
+    if (result.state === 'authenticated' && controller?.recovery) {
+      this.loginController = undefined;
+      await controller.close().catch(() => {});
+    }
+    return result;
+  }
+
+  async cancelLogin(): Promise<void> {
+    const controller = this.loginController;
+    this.loginController = undefined;
+    if (controller && this.stateValue !== 'authenticated') {
+      this.authFlight = undefined;
+      this.advance('unauthenticated');
+    }
+    await controller?.close().catch(() => {});
   }
 
   async restore(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot> {
@@ -296,6 +319,104 @@ export class ClassicSession implements ClassicSessionContract {
     this.stateValue = 'authenticating';
     debugLog.event('classic.api.session.restore.begin', { traceId, origin: this.origin });
     return this.startAuthFlight(signal, traceId, false);
+  }
+
+  async restoreWithSso(signal?: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot> {
+    abortIfNeeded(signal, 'session.restore');
+    if (this.closed) throw new ClassicApiError('AUTH_REQUIRED', 'Classic session 已关闭，请重新打开登录。', { scope: 'session.restore', retryable: false });
+    if (this.restoreFlight) return this.restoreFlight;
+    const flight = this.runRestoreWithSso(signal, traceId);
+    this.restoreFlight = flight;
+    void flight.then(
+      () => { if (this.restoreFlight === flight) this.restoreFlight = undefined; },
+      () => { if (this.restoreFlight === flight) this.restoreFlight = undefined; },
+    );
+    return flight;
+  }
+
+  private async runRestoreWithSso(signal: AbortSignal | undefined, traceId: TraceId | undefined): Promise<ClassicSessionSnapshot> {
+    try {
+      return await this.restore(signal, traceId);
+    } catch (initialError) {
+      abortIfNeeded(signal, 'session.restore.sso');
+      if (!isAuthenticationError(initialError)) throw initialError;
+      const initialErrorCode = initialError.code;
+      if (this.stateValue !== 'expired' || (this.loginController && !this.loginController.closed)) throw initialError;
+      const expiredGeneration = this.generationValue;
+      if (!this.isGenerationCurrent(expiredGeneration)) throw initialError;
+      this.advance('authenticating');
+      this.authFlight = undefined;
+      const recoveryGeneration = this.generationValue;
+      const started = Date.now();
+      debugLog.event('classic.api.session.sso.begin', { traceId, origin: this.origin, trigger: initialError.code });
+      const recoveryAbort = new AbortController();
+      const recoverySignal = recoveryAbort.signal;
+      const recoveryAbortFromCaller = (): void => {
+        if (!recoverySignal.aborted) recoveryAbort.abort(signal?.reason ?? ssoRecoveryTimeoutError());
+      };
+      signal?.addEventListener('abort', recoveryAbortFromCaller, { once: true });
+      const recoveryTimer = setTimeout(() => {
+        if (!recoverySignal.aborted) recoveryAbort.abort(ssoRecoveryTimeoutError());
+      }, SSO_RECOVERY_TIMEOUT_MS);
+      let controller: ClassicLoginController | undefined;
+      try {
+        controller = await createClassicLoginWindow({
+          origin: this.origin,
+          session: this.electronSession,
+          signal: recoverySignal,
+          mode: 'recovery',
+          promptOnBlockedNavigation: false,
+          allowedOrigins: LOGIN_AUTH_ORIGINS,
+          onClose: () => {
+            if (this.stateValue === 'authenticating' && this.loginController === controller) this.stateValue = 'unauthenticated';
+          },
+          onBlockedNavigation: url => debugLog.event('classic.api.session.sso.blocked-origin', { traceId, origin: url.origin }),
+          onRecoveryEvent: event => debugLog.event('classic.api.session.sso.stage', { traceId, stage: event.stage, challenge: event.stage === 'challenge', ...(event.kind ? { kind: event.kind } : {}), ...(event.origin && event.pathname ? { url: `${event.origin}${event.pathname}` } : {}) }),
+        });
+        if (!this.isGenerationCurrent(recoveryGeneration)) {
+          await controller.close().catch(() => {});
+          throw new ClassicApiError('AUTH_REQUIRED', 'Classic 会话已改变，请重新读取。', { scope: 'session.restore.sso.generation', retryable: false });
+        }
+        this.loginController = controller;
+        const remainingMs = Math.max(1_000, recoveryGeneration === this.generationValue ? SSO_RECOVERY_TIMEOUT_MS - (Date.now() - started) : 1_000);
+        const outcome = await controller.waitForRecovery(recoverySignal, remainingMs);
+        if (signal?.aborted) abortIfNeeded(signal, 'session.restore.sso');
+        if (recoverySignal.aborted && !signal?.aborted) throw recoverySignal.reason instanceof ClassicApiError ? recoverySignal.reason : ssoRecoveryTimeoutError();
+        if (!this.isGenerationCurrent(recoveryGeneration)) throw new ClassicApiError('AUTH_REQUIRED', 'Classic 会话已改变，请重新读取。', { scope: 'session.restore.sso.generation', retryable: false });
+        if (outcome.stage === 'challenge') {
+          debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'challenge', challenge: true, elapsedMs: Date.now() - started });
+          return this.snapshot(initialErrorCode, { stage: 'challenge', challenge: true });
+        }
+        if (outcome.stage !== 'landed') {
+          if (this.isGenerationCurrent(recoveryGeneration) && this.stateValue === 'authenticating') this.stateValue = 'unknown';
+          await controller.close().catch(() => {});
+          if (this.loginController === controller) this.loginController = undefined;
+          debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'unknown', reason: outcome.reason, challenge: false, elapsedMs: Date.now() - started });
+          throw ssoRecoveryTimeoutError();
+        }
+        debugLog.event('classic.api.session.sso.stage', { traceId, stage: 'landed', challenge: false });
+        const verified = await this.startAuthFlight(signal, traceId, false);
+        abortIfNeeded(signal, 'session.restore.sso');
+        if (this.loginController === controller) {
+          this.loginController = undefined;
+          await controller.close().catch(() => {});
+        }
+        debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'authenticated', challenge: false, elapsedMs: Date.now() - started });
+        return verified;
+      } catch (error) {
+        if (controller && this.loginController === controller && this.stateValue !== 'authenticated') {
+          this.loginController = undefined;
+          await controller.close().catch(() => {});
+        }
+        if (!controller && this.isGenerationCurrent(recoveryGeneration) && this.stateValue === 'authenticating') this.stateValue = 'unknown';
+        if (signal?.aborted) abortIfNeeded(signal, 'session.restore.sso');
+        if (recoverySignal.aborted && !signal?.aborted) throw recoverySignal.reason instanceof ClassicApiError ? recoverySignal.reason : ssoRecoveryTimeoutError();
+        throw error;
+      } finally {
+        clearTimeout(recoveryTimer);
+        signal?.removeEventListener('abort', recoveryAbortFromCaller);
+      }
+    }
   }
 
   async ensureAuthenticated(signal: AbortSignal, traceId?: TraceId): Promise<ClassicSessionSnapshot> {
@@ -457,6 +578,7 @@ export class ClassicSession implements ClassicSessionContract {
     if (this.closed) return;
     this.closed = true;
     this.authFlight = undefined;
+    this.restoreFlight = undefined;
     this.advance('unauthenticated');
     await this.loginController?.close().catch(() => {});
     this.loginController = undefined;

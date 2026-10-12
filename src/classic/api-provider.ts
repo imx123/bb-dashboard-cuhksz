@@ -186,6 +186,10 @@ export class ClassicApiProvider {
     return this.session.restore(signal, traceId);
   }
 
+  async restoreWithSso(signal?: AbortSignal, traceId?: string): Promise<ClassicSessionSnapshot> {
+    return this.session.restoreWithSso(signal, traceId);
+  }
+
   async loadOffline(signal = new AbortController().signal, traceId?: string): Promise<ClassicOfflineSnapshot | undefined> {
     if (signal.aborted) throw cancelled('provider.offline.cancel');
     if (!this.cacheScope || this.source !== 'live') return undefined;
