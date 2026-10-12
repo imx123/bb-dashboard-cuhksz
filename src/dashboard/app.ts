@@ -112,11 +112,18 @@ function rendererEventDetails(eventName: string, details: unknown): Record<strin
   if (!details || typeof details !== 'object' || Array.isArray(details)) return {};
   const input = details as Record<string, unknown>;
   if (eventName === 'navigate') return typeof input.page === 'string' ? { page: input.page.slice(0, 40) } : {};
-  if (eventName === 'filter') return {
-    ...(typeof input.page === 'string' ? { page: input.page.slice(0, 40) } : {}),
-    ...(typeof input.hasQuery === 'boolean' ? { hasQuery: input.hasQuery } : {}),
-    ...(typeof input.queryLength === 'number' && Number.isInteger(input.queryLength) ? { queryLength: Math.max(0, Math.min(200, input.queryLength)) } : {}),
-  };
+  if (eventName === 'filter') {
+    const filterKind = input.filterKind === 'course' || input.filterKind === 'status' || input.filterKind === 'query' ? input.filterKind : undefined;
+    const taskStatus = input.taskStatus === 'pending' || input.taskStatus === 'completed' || input.taskStatus === 'all' ? input.taskStatus : undefined;
+    return {
+      ...(typeof input.page === 'string' ? { page: input.page.slice(0, 40) } : {}),
+      ...(filterKind ? { filterKind } : {}),
+      ...(typeof input.hasQuery === 'boolean' ? { hasQuery: input.hasQuery } : {}),
+      ...(typeof input.queryLength === 'number' && Number.isInteger(input.queryLength) ? { queryLength: Math.max(0, Math.min(200, input.queryLength)) } : {}),
+      ...(typeof input.hasCourseFilter === 'boolean' ? { hasCourseFilter: input.hasCourseFilter } : {}),
+      ...(taskStatus ? { taskStatus } : {}),
+    };
+  }
   if (eventName === 'renderer.error') return {
     errorType: safeErrorType(input.errorType),
     ...(typeof input.line === 'number' && Number.isInteger(input.line) ? { line: Math.max(0, Math.min(1_000_000, input.line)) } : {}),
