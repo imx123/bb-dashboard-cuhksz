@@ -14,6 +14,12 @@ export interface ClassicCacheIdentity {
   readonly sessionGeneration: number;
 }
 
+export interface ClassicCacheScope {
+  readonly profileId: string;
+  readonly origin: string;
+  readonly source: SnapshotV2['source'];
+}
+
 interface CacheEnvelope {
   schemaVersion: 2;
   identity: Omit<ClassicCacheIdentity, 'sessionGeneration'> & { sessionGeneration: number };
@@ -24,6 +30,8 @@ interface CacheEnvelope {
 interface CacheFile {
   version: 2;
   entries: Record<string, CacheEnvelope>;
+  /** Protected pointer to the most recently saved account per profile/origin/source. */
+  lastAccounts?: Record<string, string>;
 }
 
 export interface ClassicProtectedCacheStore {
@@ -46,23 +54,35 @@ const CACHE_PROFILE = {
   blackboard: CLASSIC_API_ORIGIN,
 } as const;
 
-function cacheKey(identity: Omit<ClassicCacheIdentity, 'sessionGeneration'>): string {
+function cacheKey(identity: ClassicCacheScope & { readonly userId: string }): string {
   return createHash('sha256').update(JSON.stringify([identity.profileId, identity.origin, identity.userId, identity.source, 2])).digest('hex');
 }
 
-function identityWithoutGeneration(identity: ClassicCacheIdentity): Omit<ClassicCacheIdentity, 'sessionGeneration'> {
+function cacheScopeKey(scope: ClassicCacheScope): string {
+  return createHash('sha256').update(JSON.stringify([scope.profileId, scope.origin, scope.source, 2])).digest('hex');
+}
+
+function identityWithoutGeneration(identity: ClassicCacheIdentity): ClassicCacheScope & { readonly userId: string } {
   const { sessionGeneration: _generation, ...scope } = identity;
   return scope;
 }
 
 function emptyFile(): CacheFile { return { version: 2, entries: {} }; }
 
-function validIdentity(identity: ClassicCacheIdentity): void {
+function validScope(scope: ClassicCacheScope): void {
   if (
-    typeof identity.profileId !== 'string' || identity.profileId.trim().length === 0 || identity.profileId.length > 300 ||
-    identity.origin !== CLASSIC_API_ORIGIN ||
+    typeof scope.profileId !== 'string' || scope.profileId.trim().length === 0 || scope.profileId.length > 300 ||
+    scope.origin !== CLASSIC_API_ORIGIN ||
+    (scope.source !== 'live' && scope.source !== 'offline-fixture')
+  ) {
+    throw new ClassicApiError('BAD_INPUT', 'Classic 缓存账户上下文无效。', { scope: 'cache-v2.identity', retryable: false });
+  }
+}
+
+function validIdentity(identity: ClassicCacheIdentity): void {
+  validScope(identity);
+  if (
     typeof identity.userId !== 'string' || identity.userId.trim().length === 0 || identity.userId.length > 300 ||
-    (identity.source !== 'live' && identity.source !== 'offline-fixture') ||
     !Number.isInteger(identity.sessionGeneration) || identity.sessionGeneration < 0 || identity.sessionGeneration > 1_000_000_000
   ) {
     throw new ClassicApiError('BAD_INPUT', 'Classic 缓存账户上下文无效。', { scope: 'cache-v2.identity', retryable: false });
@@ -84,6 +104,7 @@ function parsedIdentity(value: unknown): CacheEnvelope['identity'] {
 }
 
 const CACHE_RESOURCE_ID = /^[a-f0-9-]{20,80}$/i;
+const CACHE_ENTRY_KEY = /^[a-f0-9]{64}$/i;
 const CACHE_RESOURCE_CONTEXT_ID = /^[A-Za-z0-9_.:-]{1,300}$/;
 const CACHE_RESOURCE_KEY = /^[a-z0-9][a-z0-9_-]{0,120}$/i;
 const CACHE_SENSITIVE_QUERY = /(?:token|ticket|code|saml|relay|state|session|jsession|cookie|auth|password|secret|signature|assertion|credential|nonce|key|otp|mfa)/i;
@@ -142,9 +163,22 @@ function validateFile(value: unknown): CacheFile {
     const resources = Array.isArray(envelope.resources)
       ? envelope.resources.map(parsedCachedResource).filter((item): item is ClassicCachedResource => item !== null).slice(0, 2_000)
       : undefined;
-    entries[key] = { schemaVersion: 2, identity, snapshot: SnapshotV2Schema.parse(envelope.snapshot), ...(resources?.length ? { resources } : {}) };
+    const snapshot = SnapshotV2Schema.parse(envelope.snapshot);
+    if (snapshot.source !== identity.source) throw new Error('cache snapshot source mismatch');
+    entries[key] = { schemaVersion: 2, identity, snapshot, ...(resources?.length ? { resources } : {}) };
   }
-  return { version: 2, entries };
+  const pointers: Record<string, string> = {};
+  const rawPointers = root.lastAccounts;
+  if (rawPointers && typeof rawPointers === 'object' && !Array.isArray(rawPointers)) {
+    for (const [scopeKey, entryKey] of Object.entries(rawPointers as Record<string, unknown>)) {
+      if (!CACHE_ENTRY_KEY.test(scopeKey) || typeof entryKey !== 'string' || !CACHE_ENTRY_KEY.test(entryKey)) continue;
+      const entry = entries[entryKey];
+      if (!entry) continue;
+      const scope: ClassicCacheScope = { profileId: entry.identity.profileId, origin: entry.identity.origin, source: entry.identity.source };
+      if (cacheScopeKey(scope) === scopeKey) pointers[scopeKey] = entryKey;
+    }
+  }
+  return { version: 2, entries, ...(Object.keys(pointers).length ? { lastAccounts: pointers } : {}) };
 }
 
 /** Reuses the audited Vault/OS keychain path; no plaintext snapshot fallback. */
@@ -265,6 +299,10 @@ export interface ClassicSnapshotCacheRead {
   readonly resources: readonly ClassicCachedResource[];
 }
 
+export interface ClassicOfflineSnapshotCacheRead extends ClassicSnapshotCacheRead {
+  readonly identity: ClassicCacheIdentity;
+}
+
 export class ClassicSnapshotV2Cache {
   private readonly store: ClassicProtectedCacheStore;
   private readonly maxAgeMs: number;
@@ -296,6 +334,31 @@ export class ClassicSnapshotV2Cache {
     return { snapshot, resources: entry.resources ?? [] };
   }
 
+  async readLastForOffline(scope: ClassicCacheScope): Promise<ClassicOfflineSnapshotCacheRead | undefined> {
+    validScope(scope);
+    const all = await this.readFile();
+    const scopeKey = cacheScopeKey(scope);
+    const pointedKey = all.lastAccounts?.[scopeKey];
+    let entryKey = pointedKey;
+    let entry = pointedKey ? all.entries[pointedKey] : undefined;
+    if (!entry || entry.identity.profileId !== scope.profileId || entry.identity.origin !== scope.origin || entry.identity.source !== scope.source) {
+      const candidates = Object.entries(all.entries).filter(([, value]) => value.identity.profileId === scope.profileId && value.identity.origin === scope.origin && value.identity.source === scope.source);
+      if (candidates.length !== 1) {
+        debugLog.event('classic.cache-v2.offline-read', { hit: false, source: scope.source, pointerPresent: Boolean(pointedKey), candidateCount: candidates.length, reason: candidates.length > 1 ? 'ambiguous' : 'missing' });
+        return undefined;
+      }
+      [entryKey, entry] = candidates[0] ?? [undefined, undefined];
+    }
+    if (!entry || !entryKey) return undefined;
+    if ((entry.snapshot.state !== 'ok' && entry.snapshot.state !== 'partial') || entry.snapshot.errors.some(error => error.code === 'AUTH_REQUIRED' || error.code === 'SESSION_EXPIRED')) {
+      debugLog.event('classic.cache-v2.offline-read', { hit: false, source: scope.source, pointerPresent: Boolean(pointedKey), candidateCount: 1, reason: 'not-success' });
+      return undefined;
+    }
+    const snapshot = markStale(entry.snapshot);
+    debugLog.event('classic.cache-v2.offline-read', { hit: true, stale: true, source: scope.source, pointerPresent: Boolean(pointedKey), candidateCount: 1, resourceContextCount: entry.resources?.length ?? 0 });
+    return { snapshot, resources: entry.resources ?? [], identity: entry.identity };
+  }
+
   async read(identity: ClassicCacheIdentity): Promise<SnapshotV2 | undefined> {
     return (await this.readWithResources(identity))?.snapshot;
   }
@@ -303,20 +366,25 @@ export class ClassicSnapshotV2Cache {
   async write(identity: ClassicCacheIdentity, snapshot: SnapshotV2, guard?: () => void, resources: readonly ClassicCachedResource[] = []): Promise<void> {
     validIdentity(identity);
     const parsed = SnapshotV2Schema.parse(snapshot);
+    if (parsed.source !== identity.source) throw new ClassicApiError('BAD_INPUT', 'Classic 缓存快照来源与账户上下文不一致。', { scope: 'cache-v2.write', retryable: false });
     const parsedResources = resources.map(parsedCachedResource).filter((item): item is ClassicCachedResource => item !== null).slice(0, 2_000);
     const scope = identityWithoutGeneration(identity);
+    const entryKey = cacheKey(scope);
+    const scopeKey = cacheScopeKey(scope);
     try {
       guard?.();
       if (this.store.update) {
         await this.store.update(previous => {
           const all = previous === null ? emptyFile() : validateFile(previous);
-          all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
+          all.entries[entryKey] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
+          all.lastAccounts = { ...(all.lastAccounts ?? {}), [scopeKey]: entryKey };
           guard?.();
           return all;
         });
       } else {
         const all = await this.readFile();
-        all.entries[cacheKey(scope)] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
+        all.entries[entryKey] = { schemaVersion: 2, identity: { ...scope, sessionGeneration: identity.sessionGeneration }, snapshot: parsed, ...(parsedResources.length ? { resources: parsedResources } : {}) };
+        all.lastAccounts = { ...(all.lastAccounts ?? {}), [scopeKey]: entryKey };
         guard?.();
         await this.store.write(all);
       }

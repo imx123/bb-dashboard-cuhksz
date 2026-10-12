@@ -1,11 +1,12 @@
 import type { Profile } from '../config.js';
+import { debugLog } from '../debug-log.js';
 import { ClassicApiError, publicApiError, type PublicClassicApiError } from './api-errors.js';
 import type { ClassicApiTransport, ClassicSession as ClassicSessionContract, ClassicSessionSnapshot } from './api-contract.js';
 import { ClassicApiClient } from './api-client.js';
 import { createRequestBudget } from './pagination.js';
 import { readClassicSnapshot } from './api-snapshot.js';
 import { readAssignmentDetail, type AssignmentDetailResult, type ClassicCachedResource, type ClassicResourceRegistrar } from './detail-reader.js';
-import { ClassicSnapshotV2Cache, mergeSnapshotV2WithCache, type ClassicCacheIdentity } from './cache-v2.js';
+import { ClassicSnapshotV2Cache, mergeSnapshotV2WithCache, type ClassicCacheIdentity, type ClassicCacheScope } from './cache-v2.js';
 import { SnapshotV2Schema, type AssignmentV2, type SnapshotV2 } from './schema-v2.js';
 
 export interface ClassicApiProviderOptions {
@@ -26,6 +27,12 @@ export interface ClassicApiProviderStatus {
   readonly error?: PublicClassicApiError;
 }
 
+export interface ClassicOfflineSnapshot {
+  readonly snapshot: SnapshotV2;
+  readonly identity: ClassicCacheIdentity;
+  readonly cachedAt: string;
+}
+
 function accountIdentity(session: ClassicSessionContract, source: SnapshotV2['source']): ClassicCacheIdentity {
   const account = session.account;
   if (!account) throw new ClassicApiError('AUTH_REQUIRED', 'Classic 会话缺少当前账户。', { scope: 'provider.identity', retryable: false });
@@ -41,13 +48,18 @@ function cancelled(scope: string): ClassicApiError {
   return new ClassicApiError('TIMEOUT', 'Classic 操作已取消。', { scope, retryable: false });
 }
 
-function addCacheError(snapshot: SnapshotV2, error: unknown): SnapshotV2 {
+function addCacheError(snapshot: SnapshotV2, error: unknown, phase: 'read' | 'write'): SnapshotV2 {
   const publicError = publicApiError(error);
   return SnapshotV2Schema.parse({
     ...snapshot,
     state: snapshot.state === 'ok' ? 'partial' : snapshot.state,
-    errors: [...snapshot.errors, { scope: publicError.scope || 'cache', code: publicError.code, message: '本机缓存未能读取，已继续使用本次 API 结果。' }],
+    errors: [...snapshot.errors, { scope: publicError.scope || 'cache', code: publicError.code, message: phase === 'write' ? '本次 API 数据已显示，但本机缓存未能保存。' : '本机缓存未能读取，已继续使用本次 API 结果。' }],
   });
+}
+
+function cacheableSnapshot(snapshot: SnapshotV2): boolean {
+  return (snapshot.state === 'ok' || snapshot.state === 'partial')
+    && !snapshot.errors.some(error => error.code === 'AUTH_REQUIRED' || error.code === 'SESSION_EXPIRED');
 }
 
 function collectResourceIds(value: unknown, output = new Set<string>()): Set<string> {
@@ -114,6 +126,7 @@ export class ClassicApiProvider {
   readonly api: ClassicApiClient;
   readonly cache: ClassicSnapshotV2Cache;
   readonly source: SnapshotV2['source'];
+  private readonly cacheScope?: ClassicCacheScope;
   private readonly resourceRegistry?: ClassicResourceRegistrar;
   private last?: SnapshotV2;
   private lastIdentity?: ClassicCacheIdentity;
@@ -138,6 +151,9 @@ export class ClassicApiProvider {
     }
     this.cache = options.cache ?? new ClassicSnapshotV2Cache();
     this.resourceRegistry = options.resourceRegistry;
+    const profileId = options.profile?.id ?? options.profileId;
+    const origin = options.profile?.blackboard ?? options.origin;
+    if (profileId && origin) this.cacheScope = { profileId, origin, source: this.source };
   }
 
   get snapshot(): SnapshotV2 | undefined {
@@ -168,6 +184,22 @@ export class ClassicApiProvider {
 
   async restore(signal?: AbortSignal, traceId?: string): Promise<ClassicSessionSnapshot> {
     return this.session.restore(signal, traceId);
+  }
+
+  async loadOffline(signal = new AbortController().signal, traceId?: string): Promise<ClassicOfflineSnapshot | undefined> {
+    if (signal.aborted) throw cancelled('provider.offline.cancel');
+    if (!this.cacheScope || this.source !== 'live') return undefined;
+    const cached = await this.cache.readLastForOffline(this.cacheScope);
+    if (signal.aborted) throw cancelled('provider.offline.cancel');
+    if (!cached) return undefined;
+    debugLog.event('classic.cache-v2.offline-hit', {
+      traceId,
+      source: this.source,
+      stale: true,
+      userIdPresent: true,
+      resourceContextCount: cached.resources.length,
+    });
+    return { snapshot: cached.snapshot, identity: cached.identity, cachedAt: cached.snapshot.fetchedAt };
   }
 
   async load(signal = new AbortController().signal, traceId?: string): Promise<SnapshotV2> {
@@ -238,11 +270,16 @@ export class ClassicApiProvider {
     const result = await readClassicSnapshot(this.api, { signal, traceId, budget, source: this.source, resourceRegistry: this.resourceRegistry });
     guard();
     let snapshot = previous ? mergeSnapshotV2WithCache(result.snapshot, previous) : result.snapshot;
-    if (cacheFailure) snapshot = addCacheError(snapshot, cacheFailure);
-    try { await this.cache.write(identity, snapshot, guard, cachedResourceContexts(this.resourceRegistry, snapshot)); }
-    catch (error) {
-      if (error instanceof ClassicApiError && ['SESSION_EXPIRED', 'AUTH_REQUIRED', 'TIMEOUT'].includes(error.code)) throw error;
-      snapshot = addCacheError(snapshot, error);
+    if (cacheFailure) snapshot = addCacheError(snapshot, cacheFailure, 'read');
+    if (cacheableSnapshot(snapshot)) {
+      try { await this.cache.write(identity, snapshot, guard, cachedResourceContexts(this.resourceRegistry, snapshot)); }
+      catch (error) {
+        if (error instanceof ClassicApiError && ['SESSION_EXPIRED', 'AUTH_REQUIRED', 'TIMEOUT'].includes(error.code)) throw error;
+        debugLog.error('classic.cache-v2.write-failure', error, { traceId, source: this.source, userIdPresent: true, snapshotState: snapshot.state });
+        snapshot = addCacheError(snapshot, error, 'write');
+      }
+    } else {
+      debugLog.event('classic.cache-v2.write-skipped', { traceId, source: this.source, userIdPresent: true, snapshotState: snapshot.state, errorCount: snapshot.errors.length });
     }
     guard();
     this.last = snapshot;

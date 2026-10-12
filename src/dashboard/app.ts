@@ -6,7 +6,7 @@ import { atomicWrite, getProfile, initProfile, locked, stateHome, type Profile }
 import { LmsError, publicError } from '../errors.js';
 import { CompletionStore as LegacyCompletionStore, completionScope } from './completion-store.js';
 import { classicDashboardHTML } from './classic-ui.js';
-import { ClassicApiProvider } from '../classic/api-provider.js';
+import { ClassicApiProvider, type ClassicOfflineSnapshot } from '../classic/api-provider.js';
 import { ClassicApiError, publicApiError } from '../classic/api-errors.js';
 import { ClassicSnapshotCache } from '../classic/cache.js';
 import { ClassicHttpClient } from '../classic/http.js';
@@ -16,6 +16,7 @@ import { CompletionStoreV2, completionKeyV2, legacyCompletionKey, planCompletion
 import { requireClassicUrl } from '../classic/url-policy.js';
 import { createTraceId, currentTraceId, debugLog, debugLogDirectory, runWithTrace } from '../debug-log.js';
 import type { AnnouncementV2, AssignmentV2, SnapshotV2 } from '../classic/schema-v2.js';
+import type { ClassicCacheIdentity } from '../classic/cache-v2.js';
 import type { ClassicAccountContext, ClassicSession as ClassicSessionContract, ClassicSessionSnapshot } from '../classic/api-contract.js';
 import { syntheticSnapshotV2 } from '../classic/fixtures/synthetic-api.js';
 
@@ -28,6 +29,9 @@ type UiSnapshot = SnapshotV2 & {
   readonly announcements: readonly UiAnnouncement[];
   readonly account: ClassicAccountContext | null;
   readonly displayWindowDays: 7 | 14 | 30;
+  readonly offlineCache?: boolean;
+  readonly readOnly?: boolean;
+  readonly cachedAt?: string;
   readonly localErrors?: readonly string[];
 };
 type UiAnnouncement = AnnouncementV2 & { localSeenAt?: string | null };
@@ -231,6 +235,18 @@ function publicLoginResult(snapshot: ClassicSessionSnapshot): Record<string, unk
   return { ok: snapshot.state === 'authenticated' && !!snapshot.account, ...snapshot };
 }
 
+function offlineFallbackAllowed(error: unknown): boolean {
+  const code = publicApiError(error).code;
+  return code === 'AUTH_REQUIRED' || code === 'SESSION_EXPIRED' || code === 'NETWORK' || code === 'TIMEOUT' || code === 'API_SCHEMA_CHANGED' || code === 'FORBIDDEN';
+}
+
+function offlineFallbackReason(error: unknown): 'no-valid-session' | 'network-unverified' | 'verification-failed' {
+  const code = publicApiError(error).code;
+  if (code === 'AUTH_REQUIRED' || code === 'SESSION_EXPIRED') return 'no-valid-session';
+  if (code === 'NETWORK' || code === 'TIMEOUT') return 'network-unverified';
+  return 'verification-failed';
+}
+
 function uiAssignments(snapshot: SnapshotV2, marks: CompletionMarks, localDue: Readonly<Record<string, string>>, manualAvailable: boolean): UiAssignment[] {
   return snapshot.assignments.map(item => {
     const manualKey = completionKeyV2(item);
@@ -347,6 +363,7 @@ export async function startDashboard(options: DashboardOptions = {}) {
     migration = undefined;
   };
   let lastAccountKey = accountKey(session);
+  let confirmedAccountKey: string | null = lastAccountKey;
   const refreshAccountBoundary = () => {
     const next = accountKey(session);
     if (next !== lastAccountKey) {
@@ -367,11 +384,21 @@ export async function startDashboard(options: DashboardOptions = {}) {
     return scope;
   };
 
+  const completionScopeForIdentity = (identity: Pick<ClassicCacheIdentity, 'profileId' | 'origin' | 'userId' | 'source'>): CompletionScopeV2 => ({
+    profileId: identity.profileId,
+    origin: identity.origin as CompletionScopeV2['origin'],
+    userId: identity.userId,
+    source: identity.source,
+  });
+
   const localScopeForAccount = (): string => {
     const account = safeAccount(session);
     if (!account) throw new ClassicApiError('AUTH_REQUIRED', '请先完成 Blackboard 登录，再读取本机日期和公告标记。', { scope: 'dashboard.local-state', retryable: false });
     return completionScope(account.profileId, `${account.origin}|dashboard-local-v2|${source}`, account.userId);
   };
+
+  const localScopeForIdentity = (identity: Pick<ClassicCacheIdentity, 'profileId' | 'origin' | 'userId' | 'source'>): string =>
+    completionScope(identity.profileId, `${identity.origin}|dashboard-local-v2|${identity.source}`, identity.userId);
 
   const localForAccount = async (): Promise<LocalDashboardScope> => {
     const scope = localScopeForAccount();
@@ -379,8 +406,19 @@ export async function startDashboard(options: DashboardOptions = {}) {
     return file.scopes[scope] ?? { due: {}, seen: {} };
   };
 
-  const decorate = async (snapshot: SnapshotV2, displayWindowDays: 7 | 14 | 30): Promise<UiSnapshot> => {
-    const scope = completionScopeForAccount();
+  const localForIdentity = async (identity: Pick<ClassicCacheIdentity, 'profileId' | 'origin' | 'userId' | 'source'>): Promise<LocalDashboardScope> => {
+    const scope = localScopeForIdentity(identity);
+    const file = await readLocalDashboardFile();
+    return file.scopes[scope] ?? { due: {}, seen: {} };
+  };
+
+  const decorate = async (snapshot: SnapshotV2, displayWindowDays: 7 | 14 | 30, options: {
+    readonly offlineCache?: boolean;
+    readonly readOnly?: boolean;
+    readonly cachedAt?: string;
+    readonly cacheIdentity?: Pick<ClassicCacheIdentity, 'profileId' | 'origin' | 'userId' | 'source'>;
+  } = {}): Promise<UiSnapshot> => {
+    const scope = options.cacheIdentity ? completionScopeForIdentity(options.cacheIdentity) : completionScopeForAccount();
     let marks: CompletionMarks = {};
     let manualAvailable = true;
     let local: LocalDashboardScope = { due: {}, seen: {} };
@@ -392,13 +430,23 @@ export async function startDashboard(options: DashboardOptions = {}) {
       manualAvailable = false;
       localErrors.push('本机完成标记读取失败，已禁用本机勾选；远程数据仍可查看。');
     }
-    try { local = await localForAccount(); }
+    try { local = options.cacheIdentity ? await localForIdentity(options.cacheIdentity) : await localForAccount(); }
     catch { localErrors.push('本机日期或公告标记读取失败，原文件已保留。'); }
-    const assignments = uiAssignments(snapshot, marks, local.due, manualAvailable);
-    manualMarksAvailable = manualAvailable;
+    const assignments = uiAssignments(snapshot, marks, local.due, options.readOnly ? false : manualAvailable);
+    manualMarksAvailable = options.readOnly ? false : manualAvailable;
     const announcements: UiAnnouncement[] = snapshot.announcements.map(item => ({ ...item, localSeenAt: local.seen[localDashboardKey('announcement', item.courseId, item.id)] ?? item.localSeenAt }));
-    visibleKeys = new Set(assignments.map(item => item.manualKey));
-    return { ...snapshot, assignments, announcements, account: safeAccount(session), displayWindowDays, ...(localErrors.length ? { localErrors } : {}) };
+    visibleKeys = options.readOnly ? new Set<string>() : new Set(assignments.map(item => item.manualKey));
+    return {
+      ...snapshot,
+      assignments,
+      announcements,
+      account: options.cacheIdentity ? null : safeAccount(session),
+      displayWindowDays,
+      ...(options.offlineCache ? { offlineCache: true } : {}),
+      ...(options.readOnly ? { readOnly: true } : {}),
+      ...(options.cachedAt ? { cachedAt: options.cachedAt } : {}),
+      ...(localErrors.length ? { localErrors } : {}),
+    };
   };
 
   const sourceUrlFor = (snapshot: SnapshotV2, target: SourceTarget): string => {
@@ -494,7 +542,9 @@ export async function startDashboard(options: DashboardOptions = {}) {
     });
   };
 
-  handle('cuhk:restore', async () => {
+  handle('cuhk:restore', async (allowOffline: unknown = false, days: unknown = 7) => {
+    if (allowOffline !== true && allowOffline !== false) throw new LmsError('BAD_INPUT', '会话恢复参数无效。');
+    if (days !== 7 && days !== 14 && days !== 30) throw new LmsError('BAD_INPUT', '请选择 7、14 或 30 天。');
     if (restoring) return restoring;
     const controller = new AbortController();
     restoreController = controller;
@@ -503,10 +553,42 @@ export async function startDashboard(options: DashboardOptions = {}) {
       try {
         const snapshot = await provider.restore(controller.signal, currentTraceId());
         refreshAccountBoundary();
+        if (snapshot.state === 'authenticated' && snapshot.account) confirmedAccountKey = accountKey(session);
         return publicLoginResult(snapshot);
       } catch (error) {
         refreshAccountBoundary();
-        return { ok: false, state: session.state, account: safeAccount(session), error: publicApiError(error) };
+        const canFallback = allowOffline === true
+          && source === 'live'
+          && confirmedAccountKey === null
+          && accountKey(session) === null
+          && !controller.signal.aborted
+          && offlineFallbackAllowed(error);
+        let cacheError: { readonly code: string; readonly scope: string } | undefined;
+        if (canFallback) {
+          try {
+            const cached: ClassicOfflineSnapshot | undefined = await provider.loadOffline(controller.signal, currentTraceId());
+            if (cached && !controller.signal.aborted && confirmedAccountKey === null && accountKey(session) === null) {
+              const decorated = await decorate(cached.snapshot, days as 7 | 14 | 30, {
+                offlineCache: true,
+                readOnly: true,
+                cachedAt: cached.cachedAt,
+                cacheIdentity: cached.identity,
+              });
+              if (controller.signal.aborted || confirmedAccountKey !== null || accountKey(session) !== null) throw new ClassicApiError('TIMEOUT', '离线缓存读取已取消。', { scope: 'dashboard.cache.offline.cancel', retryable: false });
+              const originalCode = publicApiError(error).code;
+              debugLog.event('dashboard.cache.offline-fallback', { hit: true, stale: true, source, originalCode, offlineReason: offlineFallbackReason(error) });
+              return { ok: true, state: 'offline', account: null, generation: session.generation, offlineCache: true, readOnly: true, cachedAt: cached.cachedAt, offlineReason: offlineFallbackReason(error), snapshot: decorated };
+            }
+          } catch (offlineError) {
+            const cachePublic = publicApiError(offlineError);
+            if (!controller.signal.aborted && cachePublic.code === 'CACHE_FALLBACK') {
+              const scope = typeof cachePublic.scope === 'string' ? cachePublic.scope.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120) : '';
+              cacheError = { code: cachePublic.code, scope: scope || 'cache-v2.read' };
+            }
+            debugLog.error('dashboard.cache.offline-fallback-error', offlineError, { source, originalCode: publicApiError(error).code, cacheCode: cachePublic.code });
+          }
+        }
+        return { ok: false, state: session.state, account: safeAccount(session), error: publicApiError(error), ...(cacheError ? { cacheError } : {}) };
       }
     })();
     restoring = run;
@@ -533,6 +615,7 @@ export async function startDashboard(options: DashboardOptions = {}) {
       const loadedAccountKey = accountKey(session);
       if (session.generation !== startGeneration || (startAccountKey !== null && loadedAccountKey !== startAccountKey)) throw new ClassicApiError('SESSION_EXPIRED', '登录会话在同步期间发生变化，本次结果已丢弃。', { scope: 'dashboard.load.generation', retryable: false });
       lastAccountKey = loadedAccountKey;
+      if (loadedAccountKey !== null && session.state === 'authenticated') confirmedAccountKey = loadedAccountKey;
       lastSnapshot = loaded;
       const decorated = await decorate(loaded, days as 7 | 14 | 30);
       if (session.generation !== startGeneration || accountKey(session) !== loadedAccountKey) throw new ClassicApiError('SESSION_EXPIRED', '登录会话在整理本机状态期间发生变化，本次结果已丢弃。', { scope: 'dashboard.load.decorate', retryable: false });
@@ -552,12 +635,14 @@ export async function startDashboard(options: DashboardOptions = {}) {
       abortActiveOperations(new ClassicApiError('SESSION_EXPIRED', '重新授权开始，当前操作已取消。', { scope: 'dashboard.login.begin', retryable: false }));
       for (const sourceWindow of sourceWindows) if (!sourceWindow.isDestroyed()) sourceWindow.close();
       sourceWindows.clear();
+      confirmedAccountKey = null;
       clearAccountBoundState();
     }
     refreshAccountBoundary();
     try {
       const snapshot = action === 'begin' ? await provider.beginLogin(undefined, currentTraceId()) : await provider.completeLogin(undefined, currentTraceId());
       refreshAccountBoundary();
+      if (snapshot.state === 'authenticated' && snapshot.account) confirmedAccountKey = accountKey(session);
       return publicLoginResult(snapshot);
     } catch (error) {
       refreshAccountBoundary();
@@ -637,6 +722,7 @@ export async function startDashboard(options: DashboardOptions = {}) {
   });
   handle('cuhk:resource-read', async (resourceId: unknown, kind: unknown = 'image') => {
     const id = safeResourceId(resourceId);
+    if (session.state !== 'authenticated' || !session.account) throw new ClassicApiError('AUTH_REQUIRED', '离线缓存为只读显示，媒体资源不会发起学校请求。', { scope: 'dashboard.resource-read.offline', retryable: false });
     if (kind !== 'image') throw new ClassicApiError('BAD_INPUT', '当前 Dashboard 只允许读取已注册图片资源。', { scope: 'dashboard.resource-read', retryable: false });
     if (!resourceRegistry) throw new ClassicApiError('NOT_FOUND', '当前会话未提供图片资源读取器。', { scope: 'dashboard.resource-read', retryable: false });
     const controller = new AbortController();
