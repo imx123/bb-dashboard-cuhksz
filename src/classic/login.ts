@@ -1,5 +1,6 @@
 import { BrowserWindow, dialog, type BrowserWindowConstructorOptions, type Event as ElectronEvent, type Session as ElectronSession, type WebContents, type WebContentsDidStartNavigationEventParams, type WindowOpenHandlerResponse } from 'electron';
 import { ClassicApiError } from './api-errors.js';
+import { boundedRecoveryRead } from './recovery-probe.js';
 
 export interface ClassicLoginController {
   readonly window: BrowserWindow;
@@ -32,7 +33,8 @@ export interface ClassicLoginWindowOptions {
   readonly onApprovedOrigin?: (origin: string) => void;
   readonly onClose?: () => void;
   readonly onBlockedNavigation?: (url: URL) => void;
-  readonly onRecoveryEvent?: (event: { readonly stage: 'navigation' | 'auth-link-followed' | 'challenge'; readonly kind?: ClassicLoginChallengeKind; readonly origin?: string; readonly pathname?: string }) => void;
+  readonly probeIdentity?: (signal: AbortSignal) => Promise<boolean>;
+  readonly onRecoveryEvent?: (event: { readonly stage: 'navigation' | 'auth-link-followed' | 'challenge' | 'page-read' | 'outcome' | 'window-loaded'; readonly kind?: ClassicLoginChallengeKind; readonly origin?: string; readonly pathname?: string; readonly check?: string; readonly reason?: string; readonly visible?: boolean; readonly frameCount?: number; readonly elapsedMs?: number }) => void;
 }
 
 function originOf(value: string): string {
@@ -116,10 +118,13 @@ const CHALLENGE_SCRIPT = `(() => {
   };
 })()`;
 
-async function readChallenge(contents: WebContents): Promise<ChallengeSignals | null> {
+async function readChallenge(contents: WebContents, report: (check: string, reason: string) => void): Promise<ChallengeSignals | null> {
   if (contents.isDestroyed()) return null;
   try {
-    const result = await contents.executeJavaScript(CHALLENGE_SCRIPT);
+    const read = await boundedRecoveryRead(() => contents.executeJavaScript(CHALLENGE_SCRIPT));
+    report('challenge', read.ok ? 'completed' : read.reason);
+    if (!read.ok) return null;
+    const result = read.value;
     if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
     const value = result as Record<string, unknown>;
     return {
@@ -133,12 +138,21 @@ async function readChallenge(contents: WebContents): Promise<ChallengeSignals | 
   }
 }
 
-async function findApprovedAuthLink(contents: WebContents, origins: ReadonlySet<string>, apiOrigin: string): Promise<string | null> {
+async function findApprovedAuthLink(contents: WebContents, origins: ReadonlySet<string>, apiOrigin: string, report: (check: string, reason: string) => void): Promise<string | null> {
   if (contents.isDestroyed()) return null;
   try {
-    const value = await contents.executeJavaScript(`(() => Array.from(document.querySelectorAll('a[href]')).map(anchor => anchor.href).find(href => {
+    const script = `(() => Array.from(document.querySelectorAll('a[href], area[href]')).map(anchor => anchor.href).find(href => {
       try { const url = new URL(href, location.href); return url.protocol === 'https:' && !url.username && !url.password && !url.port && url.origin === ${JSON.stringify(apiOrigin)} && ${JSON.stringify(apiOrigin)} === location.origin && /^\\/auth-saml\\/saml\\/login(?:[/?#]|$)/i.test(url.pathname); } catch { return false; }
-    }) || null)()`);
+    }) || null)()`;
+    const frames = contents.mainFrame.framesInSubtree.filter(frame => {
+      try { return new URL(frame.url).origin === apiOrigin; } catch { return false; }
+    }).slice(0, 6);
+    const reads = await Promise.all(frames.map(frame => boundedRecoveryRead(() => frame.executeJavaScript(script))));
+    let value: unknown = null;
+    for (const read of reads) {
+      if (read.ok && typeof read.value === 'string') { value = read.value; break; }
+    }
+    report('auth-link', typeof value === 'string' ? 'matched' : reads.some(read => !read.ok && read.reason === 'timeout') ? 'timeout' : reads.some(read => !read.ok) ? 'failed' : 'not-found');
     if (typeof value !== 'string' || value.length > 8_000) return null;
     const url = new URL(value);
     if (url.protocol !== 'https:' || url.username || url.password || url.port || !origins.has(url.origin) || !AUTH_LINK_PATH.test(url.pathname)) return null;
@@ -169,6 +183,15 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
   let recoveryWatcher: ((browserWindow: BrowserWindow) => void) | undefined;
   let recoveryFinish: ((outcome: ClassicLoginRecoveryOutcome) => void) | undefined;
   let controllerRef: ClassicLoginController | undefined;
+  const loggedReads = new Set<string>();
+  const reportRead = (check: string, reason: string): void => {
+    let current: URL;
+    try { current = new URL(contents.getURL()); } catch { return; }
+    const key = `${current.origin}${current.pathname}|${check}|${reason}`;
+    if (loggedReads.has(key)) return;
+    loggedReads.add(key);
+    try { options.onRecoveryEvent?.({ stage: 'page-read', check, reason, origin: current.origin, pathname: current.pathname, visible: window.isVisible(), frameCount: contents.mainFrame.framesInSubtree.length }); } catch { /* Diagnostics only. */ }
+  };
 
   const window = new BrowserWindow({
     title: 'Blackboard 登录',
@@ -283,9 +306,14 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         const stableSince = new Map<WebContents, number>();
         const inspections = new Set<WebContents>();
         const loggedNavigations = new Set<string>();
+        let identityChecking = false;
+        let lastIdentityCheck = 0;
+        const identityAbort = new AbortController();
         const finish = (outcome: ClassicLoginRecoveryOutcome): void => {
           if (settled) return;
           settled = true;
+          identityAbort.abort();
+          try { options.onRecoveryEvent?.({ stage: 'outcome', reason: outcome.stage === 'unknown' ? outcome.reason : outcome.stage }); } catch { /* Diagnostics only. */ }
           if (timer) clearTimeout(timer);
           if (pollTimer) clearInterval(pollTimer);
           for (const stabilizer of stabilizers) clearTimeout(stabilizer);
@@ -303,6 +331,15 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
           resolve(outcome);
         };
         recoveryFinish = finish;
+        const checkIdentity = async (): Promise<void> => {
+          if (settled || !options.probeIdentity || signal.aborted || identityChecking || Date.now() - lastIdentityCheck < 2000) return;
+          identityChecking = true;
+          lastIdentityCheck = Date.now();
+          try {
+            if (await options.probeIdentity(AbortSignal.any([signal, identityAbort.signal])) && !settled && !signal.aborted) finish({ stage: 'landed' });
+          } catch { reportRead('identity', 'failed'); }
+          finally { identityChecking = false; }
+        };
         const onAbort = (): void => finish({ stage: 'unknown', reason: 'aborted' });
         if (recoveryBlocked) {
           finish({ stage: 'unknown', reason: 'blocked' });
@@ -319,7 +356,8 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
             const isMainFrameLoading = (): boolean => {
               try { return webContents.isLoadingMainFrame(); } catch { return true; }
             };
-            if (!origins.has(current.origin) || isMainFrameLoading()) return;
+            if (!origins.has(current.origin)) return;
+            if (isMainFrameLoading()) { reportRead('page', 'main-frame-loading'); return; }
             const navigationKey = `${current.origin}${current.pathname}`;
             if (!loggedNavigations.has(navigationKey)) {
               loggedNavigations.add(navigationKey);
@@ -329,7 +367,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
             // auth-saml login anchor. Only after that lookup fails do we
             // classify a same-page credential form as an interaction challenge.
             if (current.origin === origin && !followedAuthLinks.size) {
-              const authLink = await findApprovedAuthLink(webContents, origins, origin);
+              const authLink = await findApprovedAuthLink(webContents, origins, origin, reportRead);
               if (settled || browserWindow.isDestroyed() || isMainFrameLoading()) return;
               let afterLinkLookup: URL;
               try { afterLinkLookup = new URL(webContents.getURL()); } catch { return; }
@@ -353,7 +391,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
                 return;
               }
             }
-            const signals = await readChallenge(webContents);
+            const signals = await readChallenge(webContents, reportRead);
             if (settled || browserWindow.isDestroyed() || isMainFrameLoading()) return;
             let afterChallenge: URL;
             try { afterChallenge = new URL(webContents.getURL()); } catch { return; }
@@ -449,8 +487,10 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         if (signal.aborted) { finish({ stage: 'unknown', reason: 'aborted' }); return; }
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(() => finish({ stage: 'unknown', reason: 'timeout' }), Math.max(1_000, Math.min(timeoutMs, 60_000)));
+        void checkIdentity();
         pollTimer = setInterval(() => {
           if (settled) return;
+          void checkIdentity();
           for (const browserWindow of [window, ...opened]) inspectSafely(browserWindow);
         }, 750);
       });
@@ -501,6 +541,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
     await controller.close();
     throw new ClassicApiError('AUTH_REQUIRED', 'Classic 登录已取消。', { scope: 'session.login', retryable: false });
   }
+  try { options.onRecoveryEvent?.({ stage: 'window-loaded', visible: window.isVisible(), origin: new URL(contents.getURL()).origin, pathname: new URL(contents.getURL()).pathname, frameCount: contents.mainFrame.framesInSubtree.length }); } catch { /* Diagnostics only. */ }
   return controller;
 }
 

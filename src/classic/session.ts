@@ -18,6 +18,7 @@ import type {
 } from './api-contract.js';
 import { ClassicHttpClient } from './http.js';
 import { createClassicLoginWindow, type ClassicLoginController } from './login.js';
+import { probeRecoveryIdentity } from './recovery-probe.js';
 
 const API_ORIGIN = 'https://bb.cuhk.edu.cn' as ClassicApiOrigin;
 const LOGIN_AUTH_ORIGINS = ['https://sts.cuhk.edu.cn'] as const;
@@ -274,6 +275,7 @@ export class ClassicSession implements ClassicSessionContract {
           if (this.stateValue === 'authenticating') this.stateValue = 'unauthenticated';
         },
         onBlockedNavigation: url => debugLog.event('classic.api.session.login.blocked-origin', { traceId, origin: url.origin }),
+        onRecoveryEvent: event => debugLog.event('classic.api.session.login.stage', { traceId, ...event }),
       });
     } catch (error) {
       if (this.stateValue === 'authenticating') this.stateValue = 'unauthenticated';
@@ -367,11 +369,17 @@ export class ClassicSession implements ClassicSessionContract {
           mode: 'recovery',
           promptOnBlockedNavigation: false,
           allowedOrigins: LOGIN_AUTH_ORIGINS,
+          probeIdentity: async probeSignal => {
+            if (!this.isGenerationCurrent(recoveryGeneration)) return false;
+            const probe = await probeRecoveryIdentity((url, init) => this.electronSession.fetch(url, init), probeSignal);
+            debugLog.event('classic.api.session.sso.identity-probe', { traceId, ...probe });
+            return probe.authenticated && this.isGenerationCurrent(recoveryGeneration);
+          },
           onClose: () => {
             if (this.stateValue === 'authenticating' && this.loginController === controller) this.stateValue = 'unauthenticated';
           },
           onBlockedNavigation: url => debugLog.event('classic.api.session.sso.blocked-origin', { traceId, origin: url.origin }),
-          onRecoveryEvent: event => debugLog.event('classic.api.session.sso.stage', { traceId, stage: event.stage, challenge: event.stage === 'challenge', ...(event.kind ? { kind: event.kind } : {}), ...(event.origin && event.pathname ? { url: `${event.origin}${event.pathname}` } : {}) }),
+          onRecoveryEvent: event => debugLog.event('classic.api.session.sso.stage', { traceId, ...event, challenge: event.stage === 'challenge', ...(event.origin && event.pathname ? { url: `${event.origin}${event.pathname}` } : {}) }),
         });
         if (!this.isGenerationCurrent(recoveryGeneration)) {
           await controller.close().catch(() => {});
@@ -404,6 +412,7 @@ export class ClassicSession implements ClassicSessionContract {
         debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'authenticated', challenge: false, elapsedMs: Date.now() - started });
         return verified;
       } catch (error) {
+        debugLog.error('classic.api.session.sso.failed', error, { traceId, elapsedMs: Date.now() - started });
         if (controller && this.loginController === controller && this.state !== 'authenticated') {
           this.loginController = undefined;
           await controller.close().catch(() => {});
