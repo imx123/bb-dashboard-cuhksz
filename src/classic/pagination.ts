@@ -288,6 +288,8 @@ function paginationError(error: unknown, scope: string, stage: PaginationStage =
 }
 
 type PaginationRejectReason = 'parse-invalid' | 'origin' | 'path' | 'course' | 'static-selector' | 'duplicate-selector';
+type CalendarRepeatReason = 'self' | 'seen-empty' | 'seen-nonempty';
+const CALENDAR_ITEMS_PATH = '/learn/api/v1/calendars/calendarItems';
 
 const ISO_RANGE_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -411,6 +413,34 @@ function rejectPaginationUrl(reason: PaginationRejectReason, message: string, cu
   throw new ClassicApiError('URL_REJECTED', message, { scope: `pagination:${target.resource}`, retryable: false });
 }
 
+function isInvestigatedCalendarEndpoint(target: ClassicEndpointTarget): boolean {
+  return target.resource === 'calendar'
+    && target.familyPrefix === CALENDAR_ITEMS_PATH
+    && target.url.pathname === CALENDAR_ITEMS_PATH;
+}
+
+function pageKey(url: URL, target: ClassicEndpointTarget): string {
+  if (!isInvestigatedCalendarEndpoint(target)) return url.href;
+  const canonical = new URL(url.href);
+  // Keep every query pair, including duplicate selectors; only normalize
+  // parameter order for the calendar self-link check.
+  canonical.searchParams.sort();
+  return canonical.href;
+}
+
+function logCalendarRepeat(reason: CalendarRepeatReason, target: ClassicEndpointTarget, next: URL, traceId: TraceId | undefined, emptyPage: boolean, pages: number, retainedItems: number): void {
+  debugLog.event('classic.api.calendar.pagination-repeat', {
+    traceId,
+    resource: 'calendar',
+    reason,
+    emptyPage,
+    pages,
+    retainedItems,
+    targetUrl: target.url.href,
+    nextUrl: next.href,
+  });
+}
+
 function nextUrl(value: string, current: URL, target: ClassicEndpointTarget, traceId?: TraceId): URL | null {
   if (!value.trim()) return null;
   let next: URL;
@@ -483,7 +513,7 @@ function pagingLink(value: ReturnType<typeof parseRawCollection>): string | null
 export async function paginateCollection<T = unknown>(options: PaginationOptions<T>): Promise<PaginatedResult<T>> {
   const maxPages = options.maxPages ?? 20;
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 100) throw new ClassicApiError('BAD_INPUT', '分页页数上限无效。', { scope: 'pagination', retryable: false });
-  const seen = new Set<string>();
+  const seenPages = new Map<string, boolean>();
   const items: T[] = [];
   let target = options.initial;
   let pages = 0;
@@ -501,8 +531,8 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
     return { items, pages, complete: false, truncated: typed.code === 'PARTIAL_RESULTS' || next !== null, nextPage: next, errors };
   };
   while (pages < maxPages) {
-    if (seen.has(target.url.href)) return finishPartial(new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 分页链接出现循环。', { scope: `pagination:${target.resource}`, retryable: false }), 'paging-link');
-    seen.add(target.url.href);
+    const currentPageKey = pageKey(target.url, options.initial);
+    if (seenPages.has(currentPageKey)) return finishPartial(new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 分页链接出现循环。', { scope: `pagination:${target.resource}`, retryable: false }), 'paging-link');
     let stage: PaginationStage = 'transport';
     try {
       const response = await options.transport.request<unknown>(pageRequest(target, options.budget, options.traceId));
@@ -510,6 +540,7 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
       stage = 'collection-envelope';
       const page = parseRawCollection(response.data, `pagination:${target.resource}`);
       const values = collectionItems(page);
+      seenPages.set(currentPageKey, values.length === 0);
       const pageNext = pagingLink(page);
       if (values.length === 0 && pageNext) {
         if (target.resource !== 'calendar') {
@@ -550,6 +581,17 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
       if (!url) {
         logSchemaSummary(target, options.traceId, schemaDiagnostics, items.length);
         return { items, pages, complete: !itemErrors, truncated: false, nextPage: null, errors };
+      }
+      const nextPageKey = pageKey(url, options.initial);
+      if (isInvestigatedCalendarEndpoint(options.initial) && seenPages.has(nextPageKey)) {
+        const reason: CalendarRepeatReason = nextPageKey === currentPageKey
+          ? (values.length === 0 ? 'self' : 'seen-nonempty')
+          : (values.length === 0 && seenPages.get(nextPageKey) === true ? 'seen-empty' : 'seen-nonempty');
+        logCalendarRepeat(reason, target, url, options.traceId, values.length === 0, pages, items.length);
+        if (values.length === 0 && (reason === 'self' || reason === 'seen-empty')) {
+          logSchemaSummary(target, options.traceId, schemaDiagnostics, items.length);
+          return { items, pages, complete: !itemErrors, truncated: false, nextPage: null, errors };
+        }
       }
       target = { ...target, url };
     } catch (error) {
