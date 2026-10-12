@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, type BrowserWindowConstructorOptions, type Session as ElectronSession, type WebContents, type WindowOpenHandlerResponse } from 'electron';
+import { BrowserWindow, dialog, type BrowserWindowConstructorOptions, type Event as ElectronEvent, type Session as ElectronSession, type WebContents, type WebContentsDidStartNavigationEventParams, type WindowOpenHandlerResponse } from 'electron';
 import { ClassicApiError } from './api-errors.js';
 
 export interface ClassicLoginController {
@@ -278,7 +278,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         let timer: ReturnType<typeof setTimeout> | undefined;
         let pollTimer: ReturnType<typeof setInterval> | undefined;
         const stabilizers = new Set<ReturnType<typeof setTimeout>>();
-        const listeners = new Map<WebContents, Array<{ event: 'did-start-navigation' | 'did-navigate' | 'did-finish-load' | 'did-navigate-in-page' | 'did-fail-load'; listener: (...args: any[]) => void }>>();
+        const listeners = new Map<WebContents, Array<() => void>>();
         const stable = new Map<WebContents, boolean>();
         const stableSince = new Map<WebContents, number>();
         const inspections = new Set<WebContents>();
@@ -290,8 +290,8 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
           if (pollTimer) clearInterval(pollTimer);
           for (const stabilizer of stabilizers) clearTimeout(stabilizer);
           signal.removeEventListener('abort', onAbort);
-          for (const [webContents, entries] of listeners) {
-            for (const entry of entries) webContents.removeListener(entry.event, entry.listener);
+          for (const removers of listeners.values()) {
+            for (const remove of removers) remove();
           }
           listeners.clear();
           stable.clear();
@@ -389,26 +389,21 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         const attach = (browserWindow: BrowserWindow, initiallyStable = false): void => {
           if (browserWindow.isDestroyed() || listeners.has(browserWindow.webContents)) return;
           const webContents = browserWindow.webContents;
-          const entries: Array<{ event: 'did-start-navigation' | 'did-navigate' | 'did-finish-load' | 'did-navigate-in-page' | 'did-fail-load'; listener: (...args: any[]) => void }> = [];
-          const add = (event: 'did-start-navigation' | 'did-navigate' | 'did-finish-load' | 'did-navigate-in-page' | 'did-fail-load', listener: (...args: any[]) => void): void => {
-            entries.push({ event, listener });
-            webContents.on(event, listener);
-          };
           const markStable = (): void => {
             stable.set(webContents, true);
             stableSince.set(webContents, Date.now());
             inspectSafely(browserWindow);
           };
-          add('did-start-navigation', (details, _url, _isInPlace, isMainFrame) => {
-            if (details?.isMainFrame ?? isMainFrame) {
-              try { const navigationUrl = new URL(details?.url ?? _url); if (navigationUrl.origin !== origin || AUTH_INTERMEDIATE_PATH.test(navigationUrl.pathname)) sawSsoNavigation = true; } catch { /* The later stable URL check remains authoritative. */ }
+          const onStartNavigation = (details: ElectronEvent<WebContentsDidStartNavigationEventParams>): void => {
+            if (details.isMainFrame) {
+              try { const navigationUrl = new URL(details.url); if (navigationUrl.origin !== origin || AUTH_INTERMEDIATE_PATH.test(navigationUrl.pathname)) sawSsoNavigation = true; } catch { /* The later stable URL check remains authoritative. */ }
               stable.set(webContents, false);
               stableSince.delete(webContents);
             }
-          });
-          add('did-navigate', (_event, _url, _httpResponseCode, _httpStatusText, isMainFrame) => { if (isMainFrame !== false) { stable.set(webContents, false); stableSince.delete(webContents); } });
-          add('did-finish-load', markStable);
-          add('did-navigate-in-page', (_event, _url, isMainFrame) => {
+          };
+          // did-navigate is emitted for main-frame navigations only.
+          const onNavigate = (): void => { stable.set(webContents, false); stableSince.delete(webContents); };
+          const onNavigateInPage = (_event: ElectronEvent, _url: string, isMainFrame: boolean): void => {
             if (isMainFrame === false) return;
             stable.set(webContents, false);
             stableSince.delete(webContents);
@@ -417,11 +412,24 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
               if (!settled && !browserWindow.isDestroyed()) markStable();
             }, 0);
             stabilizers.add(stabilizer);
-          });
-          add('did-fail-load', (_event, errorCode, _description, _validatedURL, isMainFrame) => {
+          };
+          const onFailLoad = (_event: ElectronEvent, errorCode: number, _description: string, _validatedURL: string, isMainFrame: boolean): void => {
             if (isMainFrame && errorCode !== -3) finish({ stage: 'unknown', reason: 'network' });
-          });
-          listeners.set(webContents, entries);
+          };
+          // Keep literal event names paired with their callbacks for Electron's
+          // overloads, and retain the same callbacks for deterministic cleanup.
+          webContents.on('did-start-navigation', onStartNavigation);
+          webContents.on('did-navigate', onNavigate);
+          webContents.on('did-finish-load', markStable);
+          webContents.on('did-navigate-in-page', onNavigateInPage);
+          webContents.on('did-fail-load', onFailLoad);
+          listeners.set(webContents, [
+            () => { webContents.removeListener('did-start-navigation', onStartNavigation); },
+            () => { webContents.removeListener('did-navigate', onNavigate); },
+            () => { webContents.removeListener('did-finish-load', markStable); },
+            () => { webContents.removeListener('did-navigate-in-page', onNavigateInPage); },
+            () => { webContents.removeListener('did-fail-load', onFailLoad); },
+          ]);
           stable.set(webContents, initiallyStable);
           if (initiallyStable) {
             stableSince.set(webContents, Date.now());

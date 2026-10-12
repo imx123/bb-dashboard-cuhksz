@@ -92,7 +92,7 @@ function isPublicClassicApiError(value: unknown): value is PublicClassicApiError
   return true;
 }
 
-export function isAuthenticationError(value: unknown): boolean {
+export function isAuthenticationError(value: unknown): value is ClassicApiError & { readonly code: 'AUTH_REQUIRED' | 'SESSION_EXPIRED' } {
   return value instanceof ClassicApiError && (value.code === 'AUTH_REQUIRED' || value.code === 'SESSION_EXPIRED');
 }
 

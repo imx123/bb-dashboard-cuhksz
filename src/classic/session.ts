@@ -388,7 +388,7 @@ export class ClassicSession implements ClassicSessionContract {
           return this.snapshot(initialErrorCode, { stage: 'challenge', challenge: true });
         }
         if (outcome.stage !== 'landed') {
-          if (this.isGenerationCurrent(recoveryGeneration) && this.stateValue === 'authenticating') this.stateValue = 'unknown';
+          if (this.isGenerationCurrent(recoveryGeneration) && this.state === 'authenticating') this.stateValue = 'unknown';
           await controller.close().catch(() => {});
           if (this.loginController === controller) this.loginController = undefined;
           debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'unknown', reason: outcome.reason, challenge: false, elapsedMs: Date.now() - started });
@@ -404,11 +404,11 @@ export class ClassicSession implements ClassicSessionContract {
         debugLog.event('classic.api.session.sso.outcome', { traceId, stage: 'authenticated', challenge: false, elapsedMs: Date.now() - started });
         return verified;
       } catch (error) {
-        if (controller && this.loginController === controller && this.stateValue !== 'authenticated') {
+        if (controller && this.loginController === controller && this.state !== 'authenticated') {
           this.loginController = undefined;
           await controller.close().catch(() => {});
         }
-        if (!controller && this.isGenerationCurrent(recoveryGeneration) && this.stateValue === 'authenticating') this.stateValue = 'unknown';
+        if (!controller && this.isGenerationCurrent(recoveryGeneration) && this.state === 'authenticating') this.stateValue = 'unknown';
         if (signal?.aborted) abortIfNeeded(signal, 'session.restore.sso');
         if (recoverySignal.aborted && !signal?.aborted) throw recoverySignal.reason instanceof ClassicApiError ? recoverySignal.reason : ssoRecoveryTimeoutError();
         throw error;
