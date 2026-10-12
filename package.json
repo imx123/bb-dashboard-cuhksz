@@ -60,7 +60,7 @@
     "npmRebuild": false,
     "mac": { "category": "public.app-category.education", "hardenedRuntime": true, "gatekeeperAssess": false, "icon": "assets/lms-icon.png", "target": ["dmg", "zip"] },
     "win": { "icon": "assets/lms-icon.png", "target": ["nsis"], "artifactName": "bb-dashboard-cuhksz-${version}-${arch}.${ext}" },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true },
+    "nsis": { "oneClick": false, "perMachine": true, "allowElevation": true, "allowToChangeInstallationDirectory": true },
     "linux": { "icon": "assets/lms-icon.png", "target": ["AppImage"], "category": "Education" }
   }
 }

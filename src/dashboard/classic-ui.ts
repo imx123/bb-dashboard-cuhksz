@@ -129,12 +129,20 @@ async function restoreOnStartup(){
   render();
   $('refresh').disabled=$('days').disabled=$('login').disabled=true;
   $('cancel').hidden=false;
-  $('updated').replaceChildren(node('span',undefined,'spinner'),document.createTextNode('正在检查已保存的 Blackboard 会话…'));
+  $('updated').replaceChildren(node('span',undefined,'spinner'),document.createTextNode('正在准备 Blackboard Dashboard…'));
   message('');
   try{
     const result=await bridgeCall('restore',true,Number($('days').value),true);
     if(token!==restoreToken)return;
     recordBusinessDiagnostics(result);
+    if(result?.firstUse){
+      setLoginAction('begin');
+      $('connection').textContent='首次使用 · 请登录';
+      $('connection-dot').className='dot';
+      $('updated').textContent='尚未登录和同步';
+      message('欢迎使用 CUHK(SZ) Dashboard。请点击「登录 / 重新授权」，在学校窗口完成登录后再检查连接。');
+      return;
+    }
     if(result?.state==='authenticating'&&result?.recovery?.challenge){
       awaitingInteraction=true;
       setLoginAction('complete');
@@ -225,6 +233,13 @@ async function refresh(){
     const status=await bridgeCall('status');
     if(token!==refreshToken)return;
     recordBusinessDiagnostics(status);
+    if(status?.firstUse){
+      setLoginAction('begin');
+      $('connection').textContent='首次使用 · 请登录';
+      $('connection-dot').className='dot';
+      message('首次使用请先点击「登录 / 重新授权」，完成学校登录后再刷新数据。');
+      return;
+    }
     if(status?.state==='authenticating'&&loginAction==='complete'){
       message('请在本机 Blackboard 登录窗口完成登录和 MFA，然后点击“我已登录，检查连接”。',true);
       $('connection').textContent='等待登录确认';

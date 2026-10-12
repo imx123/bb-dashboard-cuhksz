@@ -18,6 +18,7 @@ import type { AnnouncementV2, AssignmentV2, SnapshotV2 } from '../classic/schema
 import type { ClassicCacheIdentity } from '../classic/cache-v2.js';
 import type { ClassicAccountContext, ClassicSession as ClassicSessionContract, ClassicSessionSnapshot } from '../classic/api-contract.js';
 import { syntheticSnapshotV2 } from '../classic/fixtures/synthetic-api.js';
+import { DashboardStartupHistory } from './startup-history.js';
 
 type DashboardOptions = { provider?: ClassicApiProvider };
 type SourceKind = 'course' | 'announcement' | 'assignment' | 'file' | 'attachment';
@@ -299,6 +300,20 @@ export async function startDashboard(options: DashboardOptions = {}) {
   const profile = await getProfile('cuhksz');
   const origin = profileOrigin(profile);
   const source: SnapshotV2['source'] = process.env.CUHK_CLASSIC_MODE === 'offline-fixture' ? 'offline-fixture' : 'live';
+  const startupHistory = new DashboardStartupHistory(stateHome());
+  if (source === 'live') {
+    try { await startupHistory.initialize(); }
+    catch (error) { debugLog.error('dashboard.startup-history.read-failed', error); }
+  }
+  debugLog.event('dashboard.startup.mode', { firstUse: source === 'live' && !startupHistory.canRestore });
+  const recordVerifiedLogin = async () => {
+    if (source !== 'live' || startupHistory.canRestore) return;
+    try {
+      await startupHistory.recordVerifiedLogin();
+      debugLog.event('dashboard.startup-history.saved', { hasVerifiedLogin: true });
+    } catch (error) { debugLog.error('dashboard.startup-history.write-failed', error); }
+  };
+  const firstUseResult = () => ({ ok: false, state: 'unauthenticated', account: null, firstUse: true });
   debugLog.event('dashboard.start', { source, origin });
   await debugLog.flush();
 
@@ -574,6 +589,10 @@ export async function startDashboard(options: DashboardOptions = {}) {
     if (allowOffline !== true && allowOffline !== false) throw new LmsError('BAD_INPUT', '会话恢复参数无效。');
     if (days !== 7 && days !== 14 && days !== 30) throw new LmsError('BAD_INPUT', '请选择 7、14 或 30 天。');
     if (allowSso !== true && allowSso !== false) throw new LmsError('BAD_INPUT', '单点登录恢复参数无效。');
+    if (source === 'live' && !startupHistory.canRestore && session.state !== 'authenticated') {
+      debugLog.event('dashboard.restore.skipped', { firstUse: true });
+      return firstUseResult();
+    }
     if (restoring) return restoring;
     const controller = new AbortController();
     restoreController = controller;
@@ -618,12 +637,16 @@ export async function startDashboard(options: DashboardOptions = {}) {
     }
   });
   handle('cuhk:status', async () => {
+    if (source === 'live' && !startupHistory.canRestore && session.state !== 'authenticated') return firstUseResult();
     const result = await provider.status(new AbortController().signal, currentTraceId());
     refreshAccountBoundary();
     return { ok: result.ok, state: result.session.state, session: result.session, account: safeAccount(session), ...(result.error ? { error: result.error } : {}) };
   });
   handle('cuhk:load', async (days: unknown) => {
     if (days !== 7 && days !== 14 && days !== 30) throw new LmsError('BAD_INPUT', '请选择 7、14 或 30 天。');
+    if (source === 'live' && !startupHistory.canRestore && session.state !== 'authenticated') {
+      throw new ClassicApiError('AUTH_REQUIRED', '首次使用请先点击登录，完成 Blackboard 身份验证。', { scope: 'dashboard.first-use', retryable: false });
+    }
     if (loading) return loading;
     const controller = new AbortController();
     loadController = controller;
@@ -663,7 +686,10 @@ export async function startDashboard(options: DashboardOptions = {}) {
     try {
       const snapshot = action === 'begin' ? await provider.beginLogin(undefined, currentTraceId()) : await provider.completeLogin(undefined, currentTraceId());
       refreshAccountBoundary();
-      if (snapshot.state === 'authenticated' && snapshot.account) confirmedAccountKey = accountKey(session);
+      if (snapshot.state === 'authenticated' && snapshot.account) {
+        confirmedAccountKey = accountKey(session);
+        await recordVerifiedLogin();
+      }
       return publicLoginResult(snapshot);
     } catch (error) {
       refreshAccountBoundary();
