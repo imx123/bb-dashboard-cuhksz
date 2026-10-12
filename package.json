@@ -25,6 +25,7 @@
     "verify:standalone": "node scripts/verify-standalone.mjs",
     "verify:auth": "electron scripts/verify-login-preload.mjs && electron scripts/verify-adfs-preload.mjs && electron scripts/verify-auth-flow.mjs && electron scripts/verify-auth-ui.mjs",
     "pack:app": "npm run build && electron-builder --publish never",
+    "pack:app:win": "npm run build && node scripts/pack-windows-app.mjs",
     "prepack": "npm run build"
   },
   "dependencies": {
