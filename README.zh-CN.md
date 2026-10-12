@@ -62,12 +62,10 @@ fixture 只读取 `src/classic/fixtures/synthetic-api.ts`，界面会显示离�
 ```bat
 sidecar\bb-mcp\.venv\Scripts\python.exe -m unittest -v sidecar\bb-mcp\test_connector.py
 sidecar\bb-mcp\.venv\Scripts\python.exe sidecar\bb-mcp\_mcp_selftest.py
-node --import tsx --test test/classic-dashboard.test.ts
+node --import tsx --test test/classic-dashboard-ui.test.ts test/classic-api-rebuild-risks.test.ts
 node --import tsx --test test/dashboard-completion.test.ts
-node scripts/verify-classic-login.mjs
 npm.cmd run typecheck
 npm.cmd run build
-node scripts/verify-classic-electron.mjs
 npm.cmd test
 ```
 
