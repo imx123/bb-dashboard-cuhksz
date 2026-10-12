@@ -31,7 +31,7 @@ test('update selection is pinned to the exact OS, architecture, repository and c
   const result = inspectRelease(release(), VERSION);
   assert.equal(result.status, 'available'); assert.equal(result.asset?.name, portableAsset('9.0.0')); assert(result.checksumUrl);
   assert.equal(inspectRelease(release(VERSION)).status, 'current');
-  assert.equal(inspectRelease(release('0.1.0')).status, 'ahead');
+  assert.equal(inspectRelease(release('1.0.0'), '2.0.0').status, 'ahead');
   const noChecksum = release(); noChecksum.assets.pop(); assert.equal(inspectRelease(noChecksum).asset, undefined);
   const foreign = release(); foreign.assets[0]!.browser_download_url = 'https://evil.example/install.sh'; assert.equal(inspectRelease(foreign).asset, undefined);
   assert.equal(inspectRelease(release('9.0.0', 'win32', 'x64'), VERSION, 'darwin', 'arm64').asset, undefined);
