@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, ipcMain, shell, type Session as ElectronSession } from 'electron';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { atomicWrite, getProfile, initProfile, locked, stateHome, type Profile } from '../config.js';
 import { LmsError, publicError } from '../errors.js';
@@ -296,6 +297,14 @@ function offlineProvider(origin: string, profileId: string): ClassicApiProvider 
 export async function startDashboard(options: DashboardOptions = {}) {
   await app.whenReady();
   await debugLog.initialize();
+  let loginImplementationFingerprint = 'unavailable';
+  try { loginImplementationFingerprint = createHash('sha256').update(await readFile(new URL('../classic/login.js', import.meta.url))).digest('hex').slice(0, 16); } catch { /* Diagnostic only. */ }
+  debugLog.event('dashboard.runtime', {
+    packaged: app.isPackaged, appVersion: app.getVersion(),
+    electronVersion: process.versions.electron, chromiumVersion: process.versions.chrome,
+    dataScopeFingerprint: createHash('sha256').update(stateHome()).digest('hex').slice(0, 16),
+    loginImplementationFingerprint,
+  });
   await initProfile({ preset: 'cuhksz' });
   const profile = await getProfile('cuhksz');
   const origin = profileOrigin(profile);

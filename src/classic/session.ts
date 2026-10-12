@@ -1,5 +1,6 @@
 import { session as electronSession, type Session as ElectronSession } from 'electron';
 import { Cookie, CookieJar } from 'tough-cookie';
+import { createHash } from 'node:crypto';
 import type { Profile } from '../config.js';
 import { debugLog } from '../debug-log.js';
 import {
@@ -18,7 +19,7 @@ import type {
 } from './api-contract.js';
 import { ClassicHttpClient } from './http.js';
 import { createClassicLoginWindow, type ClassicLoginController } from './login.js';
-import { probeRecoveryIdentity } from './recovery-probe.js';
+import { boundedRecoveryRead } from './recovery-probe.js';
 
 const API_ORIGIN = 'https://bb.cuhk.edu.cn' as ClassicApiOrigin;
 const LOGIN_AUTH_ORIGINS = ['https://sts.cuhk.edu.cn'] as const;
@@ -196,6 +197,12 @@ export class ClassicSession implements ClassicSessionContract {
     this.partition = options.partition ?? partitionFor(profileId);
     this.allowedLoginOrigins = new Set([...LOGIN_AUTH_ORIGINS, ...(options.allowedLoginOrigins ?? [])]);
     this.electronSession = electronSession.fromPartition(this.partition);
+    debugLog.event('classic.api.session.runtime', {
+      persistent: this.electronSession.isPersistent(),
+      partitionFingerprint: createHash('sha256').update(this.partition).digest('hex').slice(0, 16),
+      storageFingerprint: createHash('sha256').update(this.electronSession.storagePath ?? 'memory').digest('hex').slice(0, 16),
+      agentFingerprint: createHash('sha256').update(this.electronSession.getUserAgent()).digest('hex').slice(0, 16),
+    });
     this.electronSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     this.electronSession.setPermissionCheckHandler(() => false);
     this.electronSession.on('will-download', event => event.preventDefault());
@@ -264,6 +271,7 @@ export class ClassicSession implements ClassicSessionContract {
     this.advance('authenticating');
     this.authFlight = undefined;
     debugLog.event('classic.api.session.login.begin', { traceId, origin: this.origin });
+    await this.logStoredStateMetadata('before-manual-window', traceId);
     try {
       this.loginController = await createClassicLoginWindow({
         origin: this.origin,
@@ -351,6 +359,7 @@ export class ClassicSession implements ClassicSessionContract {
       const recoveryGeneration = this.generationValue;
       const started = Date.now();
       debugLog.event('classic.api.session.sso.begin', { traceId, origin: this.origin, trigger: initialError.code });
+      await this.logStoredStateMetadata('before-sso-window', traceId);
       const recoveryAbort = new AbortController();
       const recoverySignal = recoveryAbort.signal;
       const recoveryAbortFromCaller = (): void => {
@@ -369,12 +378,6 @@ export class ClassicSession implements ClassicSessionContract {
           mode: 'recovery',
           promptOnBlockedNavigation: false,
           allowedOrigins: LOGIN_AUTH_ORIGINS,
-          probeIdentity: async probeSignal => {
-            if (!this.isGenerationCurrent(recoveryGeneration)) return false;
-            const probe = await probeRecoveryIdentity((url, init) => this.electronSession.fetch(url, init), probeSignal);
-            debugLog.event('classic.api.session.sso.identity-probe', { traceId, ...probe });
-            return probe.authenticated && this.isGenerationCurrent(recoveryGeneration);
-          },
           onClose: () => {
             if (this.stateValue === 'authenticating' && this.loginController === controller) this.stateValue = 'unauthenticated';
           },
@@ -599,8 +602,25 @@ export class ClassicSession implements ClassicSessionContract {
     try {
       await this.electronSession.cookies.flushStore();
       debugLog.event('classic.api.session.cookies.flushed', { reason });
+      await this.logStoredStateMetadata(reason);
     } catch (error) {
       debugLog.error('classic.api.session.cookies.flush-error', error, { reason });
+    }
+  }
+
+  private async logStoredStateMetadata(reason: string, traceId?: TraceId): Promise<void> {
+    for (const origin of [this.origin, ...LOGIN_AUTH_ORIGINS]) {
+      const result = await boundedRecoveryRead(() => this.electronSession.cookies.get({ domain: new URL(origin).hostname }));
+      if (!result.ok) {
+        debugLog.event('classic.api.session.store-metadata', { traceId, origin, reason, readResult: result.reason });
+        continue;
+      }
+      // Inspect only expiry metadata. Never output names, values or attributes.
+      debugLog.event('classic.api.session.store-metadata', {
+        traceId, origin, reason, entryCount: result.value.length,
+        persistentCount: result.value.filter(entry => !entry.session).length,
+        transientCount: result.value.filter(entry => entry.session).length,
+      });
     }
   }
 

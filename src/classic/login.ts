@@ -1,6 +1,7 @@
 import { BrowserWindow, dialog, type BrowserWindowConstructorOptions, type Event as ElectronEvent, type Session as ElectronSession, type WebContents, type WebContentsDidStartNavigationEventParams, type WindowOpenHandlerResponse } from 'electron';
 import { ClassicApiError } from './api-errors.js';
 import { boundedRecoveryRead } from './recovery-probe.js';
+import { approvedLoginTarget, literalLoginTarget } from './login-target.js';
 
 export interface ClassicLoginController {
   readonly window: BrowserWindow;
@@ -33,8 +34,7 @@ export interface ClassicLoginWindowOptions {
   readonly onApprovedOrigin?: (origin: string) => void;
   readonly onClose?: () => void;
   readonly onBlockedNavigation?: (url: URL) => void;
-  readonly probeIdentity?: (signal: AbortSignal) => Promise<boolean>;
-  readonly onRecoveryEvent?: (event: { readonly stage: 'navigation' | 'auth-link-followed' | 'challenge' | 'page-read' | 'outcome' | 'window-loaded'; readonly kind?: ClassicLoginChallengeKind; readonly origin?: string; readonly pathname?: string; readonly check?: string; readonly reason?: string; readonly visible?: boolean; readonly frameCount?: number; readonly elapsedMs?: number }) => void;
+  readonly onRecoveryEvent?: (event: { readonly stage: 'navigation' | 'auth-link-followed' | 'challenge' | 'page-read' | 'outcome' | 'window-loaded' | 'lifecycle'; readonly kind?: ClassicLoginChallengeKind; readonly origin?: string; readonly pathname?: string; readonly check?: string; readonly reason?: string; readonly visible?: boolean; readonly frameCount?: number; readonly elapsedMs?: number; readonly phase?: string; readonly loading?: boolean; readonly mainFrameLoading?: boolean; readonly errorCode?: number; readonly sawSsoNavigation?: boolean }) => void;
 }
 
 function originOf(value: string): string {
@@ -83,8 +83,7 @@ function loginWindowOptions(session: ElectronSession, hidden: boolean): BrowserW
   };
 }
 
-const AUTH_LINK_PATH = /^\/auth-saml\/saml\/login(?:[/?#]|$)/i;
-const AUTH_INTERMEDIATE_PATH = /^(?:\/auth-saml\/saml\/login|\/webapps\/login|\/login\.jsp|\/oidcAuth|\/oauth|\/saml)(?:[/?#]|$)/i;
+const AUTH_INTERMEDIATE_PATH = /^(?:\/auth-saml\/saml\/login|\/webapps\/login|\/webapps\/bb-SSOIntegrationOAuth2-BBLEARN\/authValidate\/getCode|\/login\.jsp|\/oidcAuth|\/oauth|\/saml)(?:[/?#]|$)/i;
 
 type ChallengeSignals = {
   readonly password: boolean;
@@ -141,22 +140,27 @@ async function readChallenge(contents: WebContents, report: (check: string, reas
 async function findApprovedAuthLink(contents: WebContents, origins: ReadonlySet<string>, apiOrigin: string, report: (check: string, reason: string) => void): Promise<string | null> {
   if (contents.isDestroyed()) return null;
   try {
-    const script = `(() => Array.from(document.querySelectorAll('a[href], area[href]')).map(anchor => anchor.href).find(href => {
-      try { const url = new URL(href, location.href); return url.protocol === 'https:' && !url.username && !url.password && !url.port && url.origin === ${JSON.stringify(apiOrigin)} && ${JSON.stringify(apiOrigin)} === location.origin && /^\\/auth-saml\\/saml\\/login(?:[/?#]|$)/i.test(url.pathname); } catch { return false; }
-    }) || null)()`;
+    // Read only href and the static handler text. Never evaluate/click handlers,
+    // read form values, or reconstruct the school's OAuth query parameters.
+    const script = `(() => Array.from(document.querySelectorAll('a[href], area[href], input[type="button"][onclick], button[onclick]')).slice(0, 100).map(element => element.href ? { href: element.href } : { handler: element.getAttribute('onclick') }).filter(Boolean))()`;
     const frames = contents.mainFrame.framesInSubtree.filter(frame => {
       try { return new URL(frame.url).origin === apiOrigin; } catch { return false; }
     }).slice(0, 6);
     const reads = await Promise.all(frames.map(frame => boundedRecoveryRead(() => frame.executeJavaScript(script))));
-    let value: unknown = null;
+    let value: string | null = null;
     for (const read of reads) {
-      if (read.ok && typeof read.value === 'string') { value = read.value; break; }
+      if (!read.ok || !Array.isArray(read.value)) continue;
+      for (const item of read.value.slice(0, 100)) {
+        if (!item || typeof item !== 'object') continue;
+        const candidate = typeof item.href === 'string' ? item.href : typeof item.handler === 'string' ? literalLoginTarget(item.handler) : null;
+        if (!candidate) continue;
+        value = approvedLoginTarget(candidate, apiOrigin, origins);
+        if (value) break;
+      }
+      if (value) break;
     }
     report('auth-link', typeof value === 'string' ? 'matched' : reads.some(read => !read.ok && read.reason === 'timeout') ? 'timeout' : reads.some(read => !read.ok) ? 'failed' : 'not-found');
-    if (typeof value !== 'string' || value.length > 8_000) return null;
-    const url = new URL(value);
-    if (url.protocol !== 'https:' || url.username || url.password || url.port || !origins.has(url.origin) || !AUTH_LINK_PATH.test(url.pathname)) return null;
-    return url.href;
+    return value;
   } catch {
     return null;
   }
@@ -203,6 +207,27 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
   });
   activeWindow = window;
   const contents = window.webContents;
+  const lifecycle = (target: BrowserWindow, phase: string, value?: string, errorCode?: number): void => {
+    if (target.isDestroyed()) return;
+    try {
+      const url = new URL(value ?? target.webContents.getURL());
+      options.onRecoveryEvent?.({ stage: 'lifecycle', phase, origin: url.origin, pathname: url.pathname.slice(0, 300),
+        visible: target.isVisible(), loading: target.webContents.isLoading(), mainFrameLoading: target.webContents.isLoadingMainFrame(),
+        frameCount: target.webContents.mainFrame.framesInSubtree.length, sawSsoNavigation, ...(errorCode === undefined ? {} : { errorCode }) });
+    } catch { /* No page body, title, form value or query is logged. */ }
+  };
+  const observeLifecycle = (target: BrowserWindow): void => {
+    const wc = target.webContents;
+    wc.on('did-start-navigation', details => { if (details.isMainFrame) lifecycle(target, 'navigation-start', details.url); });
+    wc.on('did-redirect-navigation', (_event, url, _inPlace, isMainFrame) => { if (isMainFrame) lifecycle(target, 'redirect', url); });
+    wc.on('did-navigate', (_event, url) => lifecycle(target, 'navigation-complete', url));
+    wc.on('dom-ready', () => lifecycle(target, 'dom-ready'));
+    wc.on('did-finish-load', () => lifecycle(target, 'load-complete'));
+    wc.on('did-fail-load', (_event, code, _description, url, isMainFrame) => { if (isMainFrame) lifecycle(target, 'load-failed', url, code); });
+  };
+  // Attach before the initial load; redirects may otherwise finish before the watcher exists.
+  observeLifecycle(window);
+  lifecycle(window, 'window-created', `${origin}/`);
 
   const requestApproval = (value: string, source?: WebContents): void => {
     if (options.promptOnBlockedNavigation === false || recovery) return;
@@ -258,6 +283,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
   const harden = (child: BrowserWindow): void => {
     opened.add(child);
     const childContents = child.webContents;
+    observeLifecycle(child);
     childContents.on('will-navigate', (event, url) => { if (!block(url, childContents)) event.preventDefault(); });
     childContents.on('will-redirect', (event, url) => { if (!block(url, childContents)) event.preventDefault(); });
     childContents.setWindowOpenHandler(({ url }): WindowOpenHandlerResponse => {
@@ -293,6 +319,7 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
       target.setSkipTaskbar(false);
       if (!target.isVisible()) target.show();
       target.focus();
+      lifecycle(target, 'window-revealed');
     },
     waitForRecovery: async (signal, timeoutMs) => {
       if (!recovery) return { stage: 'landed' };
@@ -306,13 +333,9 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         const stableSince = new Map<WebContents, number>();
         const inspections = new Set<WebContents>();
         const loggedNavigations = new Set<string>();
-        let identityChecking = false;
-        let lastIdentityCheck = 0;
-        const identityAbort = new AbortController();
         const finish = (outcome: ClassicLoginRecoveryOutcome): void => {
           if (settled) return;
           settled = true;
-          identityAbort.abort();
           try { options.onRecoveryEvent?.({ stage: 'outcome', reason: outcome.stage === 'unknown' ? outcome.reason : outcome.stage }); } catch { /* Diagnostics only. */ }
           if (timer) clearTimeout(timer);
           if (pollTimer) clearInterval(pollTimer);
@@ -331,15 +354,6 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
           resolve(outcome);
         };
         recoveryFinish = finish;
-        const checkIdentity = async (): Promise<void> => {
-          if (settled || !options.probeIdentity || signal.aborted || identityChecking || Date.now() - lastIdentityCheck < 2000) return;
-          identityChecking = true;
-          lastIdentityCheck = Date.now();
-          try {
-            if (await options.probeIdentity(AbortSignal.any([signal, identityAbort.signal])) && !settled && !signal.aborted) finish({ stage: 'landed' });
-          } catch { reportRead('identity', 'failed'); }
-          finally { identityChecking = false; }
-        };
         const onAbort = (): void => finish({ stage: 'unknown', reason: 'aborted' });
         if (recoveryBlocked) {
           finish({ stage: 'unknown', reason: 'blocked' });
@@ -487,10 +501,8 @@ export async function createClassicLoginWindow(options: ClassicLoginWindowOption
         if (signal.aborted) { finish({ stage: 'unknown', reason: 'aborted' }); return; }
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(() => finish({ stage: 'unknown', reason: 'timeout' }), Math.max(1_000, Math.min(timeoutMs, 60_000)));
-        void checkIdentity();
         pollTimer = setInterval(() => {
           if (settled) return;
-          void checkIdentity();
           for (const browserWindow of [window, ...opened]) inspectSafely(browserWindow);
         }, 750);
       });
