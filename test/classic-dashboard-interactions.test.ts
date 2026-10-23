@@ -190,3 +190,28 @@ test('课程选择跨页面保留，与搜索/状态联合过滤，离线也能�
   assert.equal(run('courseFilter'), '');
   assert.equal(requests(), 0);
 });
+
+test('课程按钮按页面数据隐藏，切换到无对应数据的页面时取消隐藏的筛选', () => {
+  const { run, elements, requests } = coursesRenderer();
+  run(`state.courses.push({id:'_3_1',name:'Empty course',code:'PHY1000'});
+    state.assignments=state.assignments.filter(item=>item.courseId==='_1_1');
+    state.announcements=state.announcements.filter(item=>item.courseId==='_2_1');
+    state.files=[];`);
+  const buttons = () => elements.get('course-filter')!.querySelectorAll('.course-filter-button').map(button => button.dataset.courseId);
+  run("navigate('tasks');courseFilter='_1_1';render()");
+  assert.deepEqual(buttons(), ['', '_1_1']);
+  run("navigate('announcements')");
+  assert.equal(run('courseFilter'), '');
+  assert.deepEqual(buttons(), ['', '_2_1']);
+  run("courseFilter='_2_1';query='no matching announcement';render()");
+  assert.equal(run('courseFilter'), '_2_1');
+  assert.deepEqual(buttons(), ['', '_2_1']);
+  run("navigate('files')");
+  assert.equal(run('courseFilter'), '');
+  assert.deepEqual(buttons(), ['']);
+  run("navigate('overview')");
+  assert.deepEqual(buttons(), ['', '_1_1', '_2_1']);
+  run("navigate('courses')");
+  assert.deepEqual(buttons(), ['', '_1_1', '_2_1', '_3_1']);
+  assert.equal(requests(), 0);
+});

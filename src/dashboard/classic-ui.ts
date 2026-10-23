@@ -170,10 +170,19 @@ function renderCoverage(){
   return p;
 }
 function shortCourseLabel(course){return String(course.code||course.name||course.id).split(/[:：]/,1)[0].trim()||'课程'}
+function coursesForPage(){
+  const courses=state?.courses||[];
+  if(page==='courses')return courses;
+  const sections=page==='tasks'?['assignments']:page==='announcements'?['announcements']:page==='files'?['files']:['assignments','announcements','files'];
+  const ids=new Set();
+  // 按已读取的数据分类，不随搜索词或完成状态变化，避免入口在操作时消失。
+  for(const section of sections)for(const item of state?.[section]||[])ids.add(item.courseId);
+  return courses.filter(course=>ids.has(course.id));
+}
 function courseFilterBar(){
   const bar=node('section',undefined,'course-filter-bar'),list=node('div',undefined,'course-filter-list');
   list.setAttribute('role','group');list.setAttribute('aria-label','按课程筛选');
-  const entries=[{id:'',name:'全部课程',code:null},...(state?.courses||[])];
+  const entries=[{id:'',name:'全部课程',code:null},...coursesForPage()];
   for(const course of entries){
     const selected=course.id===courseFilter,button=node('button',undefined,'course-filter-button'+(selected?' selected':''));
     button.type='button';button.dataset.courseId=course.id;
@@ -195,7 +204,7 @@ function courseFilterBar(){
 function taskStatusControl(){const select=node('select');select.setAttribute('aria-label','按作业状态筛选');for(const [value,label] of [['pending','未完成'],['completed','已完成'],['all','全部']]){const option=node('option',label);option.value=value;select.append(option)}select.value=taskStatus;select.onchange=()=>{taskStatus=select.value;void debugEvent('filter',{page,filterKind:'status',taskStatus});render()};return select}
 function updateTaskStats(){const count=$('task-count'),detail=$('task-count-detail'),label=count?.parentElement?.querySelector('small');if(label)label.textContent='未完成窗口内作业';if(!count)return;if(!state){count.textContent='—';if(detail)detail.textContent='';return}const windowTasks=(state.assignments||[]).filter(task=>courseMatches(task.courseId)).filter(inDisplayWindow),completed=windowTasks.filter(isTaskCompleted),pending=windowTasks.length-completed.length;count.textContent=String(pending);if(detail)detail.textContent='已完成 '+completed.length+' · 共 '+windowTasks.length+' 项'}
 function render(){
-  if(courseFilter&&!(state?.courses||[]).some(course=>course.id===courseFilter))courseFilter='';
+  if(courseFilter&&!coursesForPage().some(course=>course.id===courseFilter))courseFilter='';
   const courseHost=$('course-filter'),scrollLeft=courseHost.querySelector('.course-filter-list')?.scrollLeft||0;
   courseHost.replaceChildren(courseFilterBar());
   courseHost.querySelector('.course-filter-list').scrollLeft=scrollLeft;
