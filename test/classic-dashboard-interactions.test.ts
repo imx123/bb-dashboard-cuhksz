@@ -5,7 +5,14 @@ import { classicDashboardHTML } from '../src/dashboard/classic-ui.js';
 
 // 执行实际 renderer 程序；只替换宿主 DOM/IPC，不复制排序或缓存实现。
 class Element {
+  constructor(readonly tagName = 'div') {}
   children: Element[] = [];
+  parentElement: Element | null = null;
+  dataset: Record<string, string> = {};
+  style: Record<string, string> = {};
+  scrollLeft = 0;
+  focused = false;
+  onclick?: () => void;
   attributes = new Map<string, string>();
   listeners = new Map<string, Set<() => void>>();
   open = false;
@@ -14,17 +21,25 @@ class Element {
   src = '';
   textContent = '';
   className = '';
-  append(...children: Element[]) { this.children.push(...children); }
+  get firstChild() { return this.children[0]; }
+  append(...children: Element[]) { for (const child of children) child.parentElement = this; this.children.push(...children); }
+  replaceChildren(...children: Element[]) { this.children = []; this.append(...children); }
   set innerHTML(value: string) {
     this.children = [...value.matchAll(/<img\b[^>]*src="([^"]+)"[^>]*>/g)].map(match => {
-      const image = new Element();
+      const image = new Element('img');
       image.attributes.set('src', match[1]!);
       return image;
     });
   }
   getAttribute(key: string) { return this.attributes.get(key) ?? null; }
+  setAttribute(key: string, value: string) { this.attributes.set(key, value); }
   removeAttribute(key: string) { this.attributes.delete(key); }
-  querySelectorAll() { return this.children; }
+  querySelectorAll(selector: string): Element[] {
+    const matches = (element: Element) => selector.startsWith('.') ? element.className.split(' ').includes(selector.slice(1)) : element.tagName === selector;
+    return this.children.flatMap(child => [...(matches(child) ? [child] : []), ...child.querySelectorAll(selector)]);
+  }
+  querySelector(selector: string) { return this.querySelectorAll(selector)[0] ?? null; }
+  focus() { this.focused = true; }
   replaceWith() { this.isConnected = false; }
   addEventListener(name: string, listener: () => void) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
@@ -38,15 +53,20 @@ function renderer(readResource: (...args: unknown[]) => Promise<unknown> = async
   const script = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(classicDashboardHTML())![1]!;
   const startup = script.lastIndexOf("document.querySelectorAll('nav button')");
   assert.ok(startup > 0);
+  const elements = new Map(['course-filter', 'content', 'page-title', 'page-subtitle', 'stats', 'course-count', 'announcement-count', 'task-count', 'task-count-detail', 'coverage'].map(id => [id, new Element()]));
   const context = createContext({
     console: { info() {} },
-    document: { createElement: () => new Element(), getElementById: () => null },
-    window: { addEventListener() {}, cuhk: { readResource } },
+    document: {
+      createElement: (tag: string) => new Element(tag), getElementById: (id: string) => elements.get(id) ?? null,
+      createTextNode: (text: string) => Object.assign(new Element('#text'), { textContent: text }),
+      querySelectorAll: () => [],
+    },
+    window: { addEventListener() {}, cuhk: { readResource, debugEvent: async () => ({ ok: true }) } },
   });
   new Script(script.slice(0, startup)).runInContext(context);
   const run = <T = unknown>(code: string): T => new Script(code).runInContext(context) as T;
   run("state={source:'live',account:{profileId:'cuhksz',origin:'https://bb.cuhk.edu.cn',userId:'one',sessionGeneration:1},assignments:[],courses:[],displayWindowDays:7}");
-  return { context, run };
+  return { context, run, elements };
 }
 
 test('总览排序先显示临近截止作业，本机日期修改后重新排序', () => {
@@ -115,4 +135,55 @@ test('大图按缓存体积淘汰，单张超限图片不进入缓存', async ()
   await run<Promise<unknown>>("readImage('oversized')");
   assert.equal(run("mediaCache.has('oversized')"), false);
   assert.equal(run('mediaCacheChars<=MEDIA_CACHE_CHARS'), true);
+});
+
+function textOf(element: Element): string { return [element.textContent, ...element.children.map(textOf)].join(' '); }
+
+function coursesRenderer() {
+  let requests = 0;
+  const ui = renderer(async () => { requests++; throw new Error('Course filtering must not fetch'); });
+  ui.run(`state={...state,state:'ok',fetchedAt:new Date().toISOString(),errors:[],coverage:[],
+    courses:[{id:'_1_1',name:'Selected course',code:'AIE1000'},{id:'_2_1',name:'Other course',code:'MAT1000'}],
+    assignments:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,title:courseId==='_1_1'?'Selected task':'Other task',dueAt:new Date(Date.now()+3600000).toISOString(),attachments:[]})),
+    announcements:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,title:courseId==='_1_1'?'Selected announcement':'Other announcement',body:{text:'Synthetic',complete:true}})),
+    files:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,name:courseId==='_1_1'?'Selected file':'Other file'}))};`);
+  return { ...ui, requests: () => requests };
+}
+
+test('五个页面都可点击课程顶栏筛选，全部课程恢复列表，统计同步更新', () => {
+  const { run, elements, requests } = coursesRenderer();
+  const expected = { overview: 'Selected task', tasks: 'Selected task', courses: 'Selected course', announcements: 'Selected announcement', files: 'Selected file' };
+  for (const [page, title] of Object.entries(expected)) {
+    run(`page='${page}';courseFilter='';render()`);
+    const host = elements.get('course-filter')!;
+    assert.equal(host.querySelectorAll('.course-filter-button').length, 3);
+    host.querySelectorAll('.course-filter-button').find(button => button.dataset.courseId === '_1_1')!.onclick!();
+    const selected = host.querySelectorAll('.course-filter-button').find(button => button.dataset.courseId === '_1_1')!;
+    assert.equal(selected.getAttribute('aria-pressed'), 'true');
+    assert.equal(selected.focused, true);
+    assert.ok(textOf(elements.get('content')!).includes(title));
+    assert.doesNotMatch(textOf(elements.get('content')!), /Other (task|course|announcement|file)/);
+    assert.equal(String(elements.get('course-count')!.textContent), '1');
+    assert.equal(String(elements.get('task-count')!.textContent), '1');
+    assert.equal(String(elements.get('announcement-count')!.textContent), '1');
+    host.querySelectorAll('.course-filter-button')[0]!.onclick!();
+    assert.match(textOf(elements.get('content')!), /Other (task|course|announcement|file)/);
+    assert.equal(String(elements.get('course-count')!.textContent), '2');
+  }
+  assert.equal(requests(), 0);
+});
+
+test('课程选择跨页面保留，与搜索/状态联合过滤，离线也能切换', () => {
+  const { run, elements, requests } = coursesRenderer();
+  run("courseFilter='_1_1';state.readOnly=true;state.offlineCache=true;navigate('files')");
+  assert.equal(run('courseFilter'), '_1_1');
+  assert.doesNotMatch(textOf(elements.get('content')!), /Other file/);
+  run("navigate('tasks');query='Other';render()");
+  assert.match(textOf(elements.get('content')!), /没有未完成作业/);
+  run("query='';state.assignments[0].manualCompleted=true;taskStatus='completed';render()");
+  assert.match(textOf(elements.get('content')!), /Selected task/);
+  assert.doesNotMatch(textOf(elements.get('content')!), /Other task/);
+  run('state.courses=state.courses.slice(1);render()');
+  assert.equal(run('courseFilter'), '');
+  assert.equal(requests(), 0);
 });
