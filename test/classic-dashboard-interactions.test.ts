@@ -143,7 +143,7 @@ function coursesRenderer() {
   let requests = 0;
   const ui = renderer(async () => { requests++; throw new Error('Course filtering must not fetch'); });
   ui.run(`state={...state,state:'ok',fetchedAt:new Date().toISOString(),errors:[],coverage:[],
-    courses:[{id:'_1_1',name:'Selected course',code:'AIE1000'},{id:'_2_1',name:'Other course',code:'MAT1000'}],
+    courses:[{id:'_1_1',name:'Selected course',code:'AIE1000: Long course title'},{id:'_2_1',name:'Other course',code:'MAT1000：Long course title'}],
     assignments:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,title:courseId==='_1_1'?'Selected task':'Other task',dueAt:new Date(Date.now()+3600000).toISOString(),attachments:[]})),
     announcements:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,title:courseId==='_1_1'?'Selected announcement':'Other announcement',body:{text:'Synthetic',complete:true}})),
     files:['_1_1','_2_1'].map(courseId=>({id:courseId,courseId,name:courseId==='_1_1'?'Selected file':'Other file'}))};`);
@@ -156,6 +156,9 @@ test('五个页面都可点击课程顶栏筛选，全部课程恢复列表，�
   for (const [page, title] of Object.entries(expected)) {
     run(`page='${page}';courseFilter='';render()`);
     const host = elements.get('course-filter')!;
+    assert.doesNotMatch(textOf(host), /Long course title|[:：]/);
+    assert.equal(host.parentElement, page === 'overview' ? elements.get('content') : elements.get('content')!.children[0]);
+    if (page !== 'overview') assert.equal(host.parentElement!.children[1], host);
     assert.equal(host.querySelectorAll('.course-filter-button').length, 3);
     host.querySelectorAll('.course-filter-button').find(button => button.dataset.courseId === '_1_1')!.onclick!();
     const selected = host.querySelectorAll('.course-filter-button').find(button => button.dataset.courseId === '_1_1')!;
