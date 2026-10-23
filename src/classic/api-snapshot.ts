@@ -415,7 +415,6 @@ async function readCourse(api: ClassicApiClient, course: SnapshotV2['courses'][n
     }
   }
   coverageEntries.push(coverage(course.id, 'contents', tree.nodes.length, tree.pages, tree.complete && unknownNodeErrors.length === 0, tree.truncated, tree.restrictedNodes, [...tree.errors, ...unknownNodeErrors], fetchedAt));
-  coverageEntries.push(coverage(course.id, 'assignments', assignments.length - beforeAssignments, tree.pages, tree.complete, tree.truncated, tree.restrictedNodes, [...tree.errors, ...assignmentErrors], fetchedAt));
   coverageEntries.push(coverage(course.id, 'files', files.length - beforeFiles, tree.pages, tree.complete, tree.truncated, tree.restrictedNodes, [...tree.errors, ...fileErrors], fetchedAt));
 
   let columns;
@@ -470,6 +469,13 @@ async function readCourse(api: ClassicApiClient, course: SnapshotV2['courses'][n
   const beforeCalendarErrors = calendarMappingErrors.length;
   applyCalendarDue(calendarItems, course.id, assignments, calendarMappingErrors);
   for (const error of calendarMappingErrors.slice(beforeCalendarErrors)) errors.push(snapshotError(error, `course:${course.id}:calendar`));
+
+  // Both the content tree and grade columns can discover assignments. A
+  // failed column read must retain missing cached assignments as stale.
+  coverageEntries.push(coverage(course.id, 'assignments', assignments.length - beforeAssignments,
+    tree.pages + columns.pages, tree.complete && columns.complete,
+    tree.truncated || columns.truncated, tree.restrictedNodes,
+    [...tree.errors, ...columns.errors, ...assignmentErrors], fetchedAt));
 
   let grades;
   try {

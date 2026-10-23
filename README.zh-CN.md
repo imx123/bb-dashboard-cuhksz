@@ -46,6 +46,8 @@
 
 侧栏有 **打开诊断日志目录** 和 **复制日志位置**。日志每次都会写入本机的 `logs` 目录。分享日志或截图前先检查是否包含私人信息；不要分享密码、验证码或浏览器 profile。
 
+安全漏洞请通过[本仓库的私密报告入口](https://github.com/imx123/bb-dashboard-cuhksz/security/advisories/new)反馈；如果入口未启用，先联系[维护者 imx123](https://github.com/imx123)约定私密渠道。不要在公开 Issue 中提交漏洞利用细节、账号凭据或学生数据。
+
 ## 从源码运行
 
 准备 Node.js 24，在项目目录执行：

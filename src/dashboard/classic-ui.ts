@@ -28,7 +28,7 @@ function errorGroups(errors){const groups=new Map();for(const error of Array.isA
 function errorGroupText(group){return group.code+' · '+group.scope+' · '+group.message+(group.count>1?' ×'+group.count:'')}
 function errorSummary(errors){const groups=errorGroups(errors),visible=groups.slice(0,4).map(errorGroupText),remaining=groups.length-visible.length;return visible.join('；')+(remaining?'；另有 '+remaining+' 类错误，请查看下方“覆盖与读取状态”。':'')}
 function isAuthError(error){const code=error?.code||error?.error?.code;return code==='AUTH_REQUIRED'||code==='SESSION_EXPIRED'}
-function clearUiAccountState(){state=null;courseFilter='';activeDetailToken=++detailToken;if($('detail-dialog').open)$('detail-dialog').close();render();$('connection').textContent='等待手动连接';$('connection-dot').className='dot'}
+function clearUiAccountState(){state=null;resetMediaCache();courseFilter='';activeDetailToken=++detailToken;if($('detail-dialog').open)$('detail-dialog').close();render();$('connection').textContent='等待手动连接';$('connection-dot').className='dot'}
 function empty(parent,text){parent.append(node('p',text,'empty'))}
 function panel(title,more){const p=node('section',undefined,'panel'),head=node('div',undefined,'panel-head');head.append(node('h2',title));if(more){const b=node('button','查看全部 →','text-button');b.onclick=()=>navigate(more);head.append(b)}p.append(head);return p}
 function courseRecord(id){return (state?.courses||[]).find(c=>c.id===id)||null}
@@ -47,9 +47,61 @@ function isRemoteCompleted(task){const s=task.submission||{};return s.remoteSubm
 function isTaskCompleted(task){return isRemoteCompleted(task)||task.manualCompleted===true}
 function taskStatusMatches(task,filter=taskStatus){return filter==='all'||(filter==='completed'?isTaskCompleted(task):!isTaskCompleted(task))}
 function taskSearchText(task){return (task.title+' '+courseLabel(task.courseId)).toLowerCase()}
-function filteredTasks(status=taskStatus){const needle=query.toLowerCase();return (state?.assignments||[]).filter(inDisplayWindow).filter(task=>courseMatches(task.courseId)).filter(task=>taskStatusMatches(task,status)).filter(task=>!needle||taskSearchText(task).includes(needle))}
+function filteredTasks(status=taskStatus){const needle=query.toLowerCase();return (state?.assignments||[]).filter(inDisplayWindow).filter(task=>courseMatches(task.courseId)).filter(task=>taskStatusMatches(task,status)).filter(task=>!needle||taskSearchText(task).includes(needle)).sort((left,right)=>(taskTimestamp(left)??Infinity)-(taskTimestamp(right)??Infinity)||left.courseId.localeCompare(right.courseId)||left.id.localeCompare(right.id))}
 function submissionText(task){const s=task.submission||{};const parts=[];if(isRemoteCompleted(task))parts.push('学校已提交');else if(s.remoteSubmission==='not-submitted')parts.push('学校未提交');else parts.push('提交状态未确认');if(s.latestAttemptState&&s.latestAttemptState!=='unknown')parts.push('尝试：'+s.latestAttemptState);if(s.attemptCount!==null&&s.attemptCount!==undefined)parts.push('历史 '+s.attemptCount+' 次'+(s.historyComplete?'':'（未完整）'));if(s.submittedAt)parts.push('提交于 '+dateTime(s.submittedAt,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false}));return parts.join(' · ')}
-function appendRich(parent,body){if(!body){return}const wrap=node('div',undefined,'rich-body');if(body.sanitizedHtml){wrap.innerHTML=body.sanitizedHtml;const images=[...wrap.querySelectorAll('img')];for(const image of images){const source=image.getAttribute('src')||'';const match=/^lms-resource:\/\/resource\/(.+)$/.exec(source);if(!match){image.replaceWith(node('span','媒体来源未通过校验','media-failed'));continue}if(state?.readOnly){image.replaceWith(node('span','离线缓存未读取媒体','media-failed'));continue}let resourceId;try{resourceId=decodeURIComponent(match[1])}catch{resourceId=''}image.removeAttribute('src');image.alt=image.alt||'媒体加载中';bridgeCall('readResource',resourceId,'image').then(result=>{recordBusinessDiagnostics(result);if(result?.ok&&result.dataUrl){image.src=result.dataUrl;image.alt=image.alt||'Blackboard 图片'}else image.replaceWith(node('span','媒体未能读取（'+(result?.error?.code||'RESOURCE_FAILED')+'）','media-failed'))}).catch(()=>image.replaceWith(node('span','媒体未能读取','media-failed')))}parent.append(wrap)}else parent.append(node('pre',body.text||'暂无正文。','rich-body'));if(body.links?.length){const links=node('div',undefined,'rich-links');for(const link of body.links)links.append(node('span','链接：'+link.label,'rich-link'));parent.append(links)}if(body.complete!==true)parent.append(node('span','正文或附件读取不完整','badge partial'))}
+// 图片只在当前账号及会话代次内复用；限制缓存体积，避免长时间使用积累大图。
+const mediaCache=new Map(),mediaFlights=new Map(),MEDIA_CACHE_CHARS=32*1024*1024;
+let mediaScope='',mediaEpoch=0,mediaCacheChars=0;
+function resetMediaCache(){mediaCache.clear();mediaFlights.clear();mediaCacheChars=0;mediaScope='';mediaEpoch++}
+function syncMediaScope(){const account=state?.account,key=JSON.stringify([state?.source,account?.profileId,account?.origin,account?.userId,account?.sessionGeneration,Boolean(state?.readOnly)]);if(key!==mediaScope){resetMediaCache();mediaScope=key}}
+function readImage(resourceId){
+  syncMediaScope();
+  const cached=mediaCache.get(resourceId);
+  if(cached){mediaCache.delete(resourceId);mediaCache.set(resourceId,cached);return Promise.resolve(cached)}
+  if(mediaFlights.has(resourceId))return mediaFlights.get(resourceId);
+  const epoch=mediaEpoch;
+  const pending=bridgeCall('readResource',resourceId,'image').then(result=>{
+    if(epoch===mediaEpoch&&result?.ok&&typeof result.dataUrl==='string'&&result.dataUrl.length<=MEDIA_CACHE_CHARS){
+      mediaCache.set(resourceId,result);mediaCacheChars+=result.dataUrl.length;
+      while(mediaCache.size>64||mediaCacheChars>MEDIA_CACHE_CHARS){const oldest=mediaCache.keys().next().value,entry=mediaCache.get(oldest);mediaCache.delete(oldest);mediaCacheChars-=entry.dataUrl.length}
+    }
+    return result;
+  }).finally(()=>{if(mediaFlights.get(resourceId)===pending)mediaFlights.delete(resourceId)});
+  mediaFlights.set(resourceId,pending);
+  return pending;
+}
+function appendRich(parent,body,lazy=false){
+  if(!body)return;
+  const wrap=node('div',undefined,'rich-body');
+  if(body.sanitizedHtml){
+    wrap.innerHTML=body.sanitizedHtml;
+    const reads=[];
+    for(const image of wrap.querySelectorAll('img')){
+      const source=image.getAttribute('src')||'',match=/^lms-resource:\/\/resource\/(.+)$/.exec(source);
+      image.removeAttribute('src');
+      if(!match){image.replaceWith(node('span','媒体来源未通过校验','media-failed'));continue}
+      if(state?.readOnly){image.replaceWith(node('span','离线缓存未读取媒体','media-failed'));continue}
+      let resourceId;try{resourceId=decodeURIComponent(match[1])}catch{resourceId=''}
+      image.alt=image.alt||'媒体加载中';
+      reads.push(()=>{
+        syncMediaScope();const snapshot=state,epoch=mediaEpoch;
+        readImage(resourceId).then(result=>{
+          if(!image.isConnected||state!==snapshot||epoch!==mediaEpoch)return;
+          recordBusinessDiagnostics(result);
+          if(result?.ok&&result.dataUrl){image.src=result.dataUrl;if(image.alt==='媒体加载中')image.alt='Blackboard 图片'}
+          else image.replaceWith(node('span','媒体未能读取（'+(result?.error?.code||'RESOURCE_FAILED')+'）','media-failed'));
+        }).catch(()=>{if(image.isConnected&&state===snapshot&&epoch===mediaEpoch)image.replaceWith(node('span','媒体未能读取','media-failed'))});
+      });
+    }
+    parent.append(wrap);
+    let started=false;
+    const start=()=>{if(started||(lazy&&!parent.open))return;started=true;parent.removeEventListener('toggle',start);for(const read of reads)read()};
+    if(lazy)parent.addEventListener('toggle',start);
+    start();
+  }else parent.append(node('pre',body.text||'暂无正文。','rich-body'));
+  if(body.links?.length){const links=node('div',undefined,'rich-links');for(const link of body.links)links.append(node('span','链接：'+link.label,'rich-link'));parent.append(links)}
+  if(body.complete!==true)parent.append(node('span','正文或附件读取不完整','badge partial'));
+}
 function taskDetailButton(task){const b=node('button',state?.readOnly?'查看缓存详情':'读取详情','text-button');b.disabled=busy;b.onclick=()=>showDetail(task);return b}
 function taskStatusText(status){return status==='completed'?'已完成':status==='all'?'全部':'未完成'}
 function renderTasks(parent,limit,statusOverride=null){
@@ -91,7 +143,7 @@ async function setCompletion(task,value){if(state?.readOnly){message('本机缓�
 function renderCourses(parent,limit){const grid=node('div',undefined,'course-grid'),courses=(state?.courses||[]).filter(c=>(c.name+' '+(c.code||'')).toLowerCase().includes(query.toLowerCase()));if(!courses.length){empty(parent,state?'没有匹配的课程。':'登录后刷新查看课程。');return}for(const course of courses.slice(0,limit||courses.length)){const card=node('article',undefined,'course-card');card.append(node('div',course.code||course.id,'course-code'),node('h3',course.name));const bottom=node('div',undefined,'course-bottom'),actions=node('div',undefined,'course-actions');bottom.append(node('span',course.available===false?'不可用':'Classic 只读','badge'));const open=node('button','打开 Blackboard');open.disabled=Boolean(state?.readOnly)||!course.url;open.onclick=()=>openSource('course',course.id);actions.append(open);bottom.append(actions);card.append(bottom);grid.append(card)}parent.append(grid)}
 function announcementTimestamp(item){const value=item.visibleFrom||item.publishedAt||item.createdAt||item.modifiedAt;const parsed=value?Date.parse(value):NaN;return Number.isFinite(parsed)?parsed:0}
 function announcementDate(item){if(item.visibleFrom)return'可见于 '+dateTime(item.visibleFrom,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});if(item.publishedAt)return'发布于 '+dateTime(item.publishedAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});if(item.createdAt)return'创建于 '+dateTime(item.createdAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});if(item.modifiedAt)return'修改于 '+dateTime(item.modifiedAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});return'日期未提供'}
-function renderAnnouncements(parent,limit){const needle=query.toLowerCase(),list=(state?.announcements||[]).filter(a=>courseMatches(a.courseId)).filter(a=>!needle||(a.title+' '+courseLabel(a.courseId)+' '+a.body.text).toLowerCase().includes(needle)).sort((left,right)=>announcementTimestamp(right)-announcementTimestamp(left));if(!list.length){empty(parent,state?'没有匹配的公告；可切换课程或清空搜索。':'登录后刷新查看公告。');return}for(const announcement of list.slice(0,limit||list.length)){const details=node('details',undefined,'announcement'),summary=node('summary'),title=node('span',announcement.title),course=node('span',courseLabel(announcement.courseId),'announcement-course course-identity');summary.append(title,course);details.append(summary,node('div',announcementDate(announcement)+(announcement.localSeenAt?' · 本机已读':''),'announcement-meta'));appendRich(details,announcement.body);const b=node('button','在 Blackboard 查看 →','text-button');b.disabled=Boolean(state?.readOnly)||!announcement.id;b.onclick=()=>openSource('announcement',announcement.id,announcement.courseId);const seen=node('button',announcement.localSeenAt?'取消本机已读':'标记本机已读','text-button');seen.disabled=Boolean(state?.readOnly);seen.onclick=async()=>{const result=await bridgeCall('markAnnouncementSeen',{courseId:announcement.courseId,id:announcement.id},!announcement.localSeenAt);recordBusinessDiagnostics(result);if(result?.ok){announcement.localSeenAt=result.localSeen?new Date().toISOString():null;render()}else message(errorLabel(result?.error,'本机已读标记未能保存。'),true)};details.append(b,seen);parent.append(details)}}
+function renderAnnouncements(parent,limit){const needle=query.toLowerCase(),list=(state?.announcements||[]).filter(a=>courseMatches(a.courseId)).filter(a=>!needle||(a.title+' '+courseLabel(a.courseId)+' '+a.body.text).toLowerCase().includes(needle)).sort((left,right)=>announcementTimestamp(right)-announcementTimestamp(left));if(!list.length){empty(parent,state?'没有匹配的公告；可切换课程或清空搜索。':'登录后刷新查看公告。');return}for(const announcement of list.slice(0,limit||list.length)){const details=node('details',undefined,'announcement'),summary=node('summary'),title=node('span',announcement.title),course=node('span',courseLabel(announcement.courseId),'announcement-course course-identity');summary.append(title,course);details.append(summary,node('div',announcementDate(announcement)+(announcement.localSeenAt?' · 本机已读':''),'announcement-meta'));appendRich(details,announcement.body,true);const b=node('button','在 Blackboard 查看 →','text-button');b.disabled=Boolean(state?.readOnly)||!announcement.id;b.onclick=()=>openSource('announcement',announcement.id,announcement.courseId);const seen=node('button',announcement.localSeenAt?'取消本机已读':'标记本机已读','text-button');seen.disabled=Boolean(state?.readOnly);seen.onclick=async()=>{const result=await bridgeCall('markAnnouncementSeen',{courseId:announcement.courseId,id:announcement.id},!announcement.localSeenAt);recordBusinessDiagnostics(result);if(result?.ok){announcement.localSeenAt=result.localSeen?new Date().toISOString():null;render()}else message(errorLabel(result?.error,'本机已读标记未能保存。'),true)};details.append(b,seen);parent.append(details)}}
 function fileDate(item){if(item.publishedAt)return'发布于 '+dateTime(item.publishedAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});if(item.createdAt)return'创建于 '+dateTime(item.createdAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});if(item.modifiedAt)return'修改于 '+dateTime(item.modifiedAt,{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});return'日期未提供'}
 function renderFiles(parent){const needle=query.toLowerCase(),files=(state?.files||[]).filter(f=>courseMatches(f.courseId)).filter(f=>!needle||(f.name+' '+courseLabel(f.courseId)).toLowerCase().includes(needle));if(!files.length){empty(parent,state?'没有匹配的课程资料；可切换课程或清空搜索。':'登录后刷新查看课程资料。');return}for(const file of files){const row=node('div',undefined,'file'),info=node('div'),b=node('button',file.url?'打开来源 ↗':'无来源链接','text-button');info.append(node('div',file.name,'file-name'),node('div',courseLabel(file.courseId),'course-identity'),node('div',fileDate(file),'file-meta'));b.disabled=Boolean(state?.readOnly)||!file.id;b.onclick=()=>openSource('file',file.id,file.courseId);row.append(info,b);parent.append(row)}}
 function renderCoverage(){

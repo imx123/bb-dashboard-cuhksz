@@ -191,7 +191,7 @@ function bodyText(value: unknown): string {
   return '';
 }
 
-function richBody(value: unknown, context: NormalizationContext, baseUrl?: string, courseId?: string, contentId?: string) {
+export function normalizeRichBody(value: unknown, context: NormalizationContext, baseUrl?: string, courseId?: string, contentId?: string) {
   const pageUrl = courseId
     ? findBbcsWebDavSourcePage(value, courseId, contentId) ?? (baseUrl ? safeBbcsWebDavSourcePage(baseUrl, courseId, contentId) : null) ?? fallbackBbcsWebDavSourcePage(courseId, contentId)
     : null;
@@ -242,7 +242,7 @@ export function normalizeSubmission(value: unknown, context: NormalizationContex
     if (!item) return undefined;
     const feedbackValue = item.feedback ?? item.feedbackToUser;
     if (feedbackValue === undefined) return item;
-    const sanitized = richBody(feedbackValue, context, baseUrl, courseId, contentId);
+    const sanitized = normalizeRichBody(feedbackValue, context, baseUrl, courseId, contentId);
     return { ...item, feedback: sanitized, feedbackToUser: sanitized, [TRUSTED_FEEDBACK]: true };
   };
   const attempt = sanitizeHolder(source.lastAttempt ?? source.attempt);
@@ -255,7 +255,7 @@ export function normalizeSubmission(value: unknown, context: NormalizationContex
     ...(source.lastAttempt !== undefined ? { lastAttempt: attempt } : {}),
     ...(source.attempt !== undefined ? { attempt } : {}),
     ...(history ? { history } : {}),
-    ...(feedbackValue === undefined ? {} : { feedback: richBody(feedbackValue, context, baseUrl, courseId, contentId), [TRUSTED_FEEDBACK]: true }),
+    ...(feedbackValue === undefined ? {} : { feedback: normalizeRichBody(feedbackValue, context, baseUrl, courseId, contentId), [TRUSTED_FEEDBACK]: true }),
   };
   return deriveSubmissionSummary(prepared);
 }
@@ -319,7 +319,7 @@ export function normalizeAnnouncement(value: unknown, context: NormalizationCont
     id,
     courseId,
     title,
-    body: richBody(item.body ?? item.displayText ?? item.rawText, context, sourceUrl ?? undefined, courseId),
+    body: normalizeRichBody(item.body ?? item.displayText ?? item.rawText, context, sourceUrl ?? undefined, courseId),
     createdAt: parseDate(item.createdAt ?? item.createdDate, `announcement:${id}:createdAt`),
     modifiedAt: parseDate(item.modifiedAt ?? item.modifiedDate, `announcement:${id}:modifiedAt`),
     visibleFrom: parseDate(item.startDateRestriction, `announcement:${id}:visibleFrom`),
@@ -375,7 +375,7 @@ export function normalizeAssignment(value: unknown, context: NormalizationContex
     dueConflict,
     url: assignmentUrl,
     summary: typeof item.summary === 'string' ? item.summary : null,
-    details: item.body === undefined && item.details === undefined && item.description === undefined ? null : richBody(item.body ?? item.details ?? item.description, context, assignmentUrl ?? undefined, courseId, contentId),
+    details: item.body === undefined && item.details === undefined && item.description === undefined ? null : normalizeRichBody(item.body ?? item.details ?? item.description, context, assignmentUrl ?? undefined, courseId, contentId),
     attachments: attachmentValues(item.attachments, `assignment:${id}`, context, courseId, contentId),
     submission,
     provenance: provenance(context),

@@ -3,8 +3,8 @@ import { ClassicApiError, isAuthenticationError, publicApiError, type PublicClas
 import type { ClassicApiClient } from './api-client.js';
 import type { ClassicApiCallOptions } from './api-contract.js';
 import { rawId, rawRecord, rawString, type RawContentNode, type RawFile } from './raw-schema.js';
-import { sanitizeRichBody } from './rich-text.js';
-import { AssignmentV2Schema, emptyRichBody, type AssignmentV2, type AttachmentV2, type RichBody } from './schema-v2.js';
+import { normalizeRichBody } from './normalize.js';
+import { AssignmentV2Schema, type AssignmentV2, type AttachmentV2, type RichBody } from './schema-v2.js';
 import { CLASSIC_API_ORIGIN } from './api-contract.js';
 
 export interface ClassicCachedResource {
@@ -49,18 +49,10 @@ export interface AssignmentDetailOptions extends ClassicApiCallOptions {
 
 function richBody(value: unknown, options: AssignmentDetailOptions, baseUrl?: string, courseId?: string, contentId?: string): RichBody | null {
   if (value === undefined || value === null) return null;
-  try {
-    return sanitizeRichBody(value, {
-      baseUrl,
-      registerImage: (url, alt) => {
-        const resourceId = options.resourceRegistry?.register({ kind: 'image', url, courseId, contentId, traceId: options.traceId });
-        return resourceId ? { resourceId, alt } : null;
-      },
-    });
-  } catch {
-    if (typeof value === 'string') return emptyRichBody(value, false);
-    return null;
-  }
+  return normalizeRichBody(value, {
+    fetchedAt: new Date().toISOString(), source: 'internal-api',
+    resourceRegistry: options.resourceRegistry, traceId: options.traceId,
+  }, baseUrl, courseId, contentId);
 }
 
 function safeSourceUrl(value: unknown): string | null {

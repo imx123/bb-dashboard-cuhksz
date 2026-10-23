@@ -46,6 +46,8 @@ If login or refresh fails, try **登录 / 重新授权** and check the connectio
 
 The sidebar has **打开诊断日志目录** and **复制日志位置**. Logs are saved locally in the app's `logs` folder. Before sharing a log or screenshot, check it for private information; never share your password, verification codes or browser profile.
 
+Report security vulnerabilities through [this repository's private reporting page](https://github.com/imx123/bb-dashboard-cuhksz/security/advisories/new). If it is disabled, contact [imx123](https://github.com/imx123) to arrange a private channel first. Do not post exploit details, credentials or student data in public issues.
+
 ## Run from source
 
 Use Node.js 24 and run these commands from the project folder:
