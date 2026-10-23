@@ -4,6 +4,7 @@ import type { ClassicApiRequest, ClassicApiResource, ClassicApiTransport, Classi
 import { collectionItems, parseRawCollection } from './raw-schema.js';
 import type { ClassicEndpointTarget } from './endpoints.js';
 import { ZodError } from 'zod';
+import { createHash } from 'node:crypto';
 
 export interface PaginatedResult<T> {
   readonly items: T[];
@@ -507,6 +508,91 @@ function pagingLink(value: ReturnType<typeof parseRawCollection>): string | null
   return typeof link === 'string' ? link : null;
 }
 
+/** Opt-in investigation: only counts, known field names and boundary relations leave this function. */
+function logCalendarPageMetadata(target: ClassicEndpointTarget, page: ReturnType<typeof parseRawCollection>, values: unknown[], pages: number, traceId: TraceId | undefined, seenRecords: Set<string>): void {
+  const fieldNames = ['id', 'calendarItemId', 'eventId', 'calendarId', 'courseId', 'type', 'start', 'end', 'itemSourceType', 'itemSourceId', 'startDate', 'endDate'];
+  const fieldCounts = Object.fromEntries(fieldNames.map(key => [key, 0]));
+  const until = rangeInstant(target.url.searchParams.get('until') ?? '');
+  const since = rangeInstant(target.url.searchParams.get('since') ?? '');
+  let repeatedRecords = 0, datedRecords = 0, atUntil = 0, beforeSince = 0, afterUntil = 0;
+  let firstStart: number | undefined, lastStart: number | undefined;
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const row = value as Record<string, unknown>;
+    for (const key of fieldNames) if (row[key] !== undefined && row[key] !== null) fieldCounts[key]! += 1;
+    // Fingerprints stay in memory and are never logged or used to drop rows.
+    const fingerprint = createHash('sha256').update(JSON.stringify(row)).digest('hex');
+    if (seenRecords.has(fingerprint)) repeatedRecords++;
+    seenRecords.add(fingerprint);
+    const rawStart = row.start ?? row.startDate;
+    const start = typeof rawStart === 'string' ? rangeInstant(rawStart) : undefined;
+    if (start === undefined) continue;
+    datedRecords++;
+    firstStart = firstStart === undefined ? start : Math.min(firstStart, start);
+    lastStart = lastStart === undefined ? start : Math.max(lastStart, start);
+    if (start === until) atUntil++;
+    if (since !== undefined && start < since) beforeSince++;
+    if (until !== undefined && start > until) afterUntil++;
+  }
+  let next: URL | undefined;
+  try { const link = pagingLink(page); if (link) next = new URL(link, target.url); } catch { /* The real validator reports malformed links. */ }
+  const nextUntil = next ? rangeInstant(next.searchParams.get('until') ?? '') : undefined;
+  const nextSince = next ? rangeInstant(next.searchParams.get('since') ?? '') : undefined;
+  const relation = (left: number | undefined, right: number | undefined): string => left === undefined || right === undefined ? 'unknown' : left === right ? 'equal' : left < right ? 'before' : 'after';
+  const paging = page.paging as Record<string, unknown> | null | undefined;
+  debugLog.event('classic.api.calendar.page-metadata', {
+    traceId, pages, rowCount: values.length, repeatedRecords, datedRecords, atUntil, beforeSince, afterUntil,
+    fieldCounts,
+    nextSincePresent: next?.searchParams.has('since') ?? false,
+    nextUntilPresent: next?.searchParams.has('until') ?? false,
+    nextSinceVsCurrent: relation(nextSince, since),
+    requestedDays: since !== undefined && until !== undefined ? (until - since) / 86400000 : null,
+    nextUntilDaysAfterSince: nextUntil !== undefined && since !== undefined ? (nextUntil - since) / 86400000 : null,
+    nextUntilDaysBeforeUntil: nextUntil !== undefined && until !== undefined ? (until - nextUntil) / 86400000 : null,
+    nextLimitEqualsRequested: next?.searchParams.get('limit') === target.url.searchParams.get('limit'),
+    nextOffsetPresent: next?.searchParams.has('offset') ?? false,
+    nextUntilVsCurrent: relation(nextUntil, until),
+    nextUntilVsEarliestStart: relation(nextUntil, firstStart),
+    nextUntilVsLatestStart: relation(nextUntil, lastStart),
+    serverCount: typeof paging?.count === 'number' && Number.isSafeInteger(paging.count) ? paging.count : null,
+    serverLimit: typeof paging?.limit === 'number' && Number.isSafeInteger(paging.limit) ? paging.limit : null,
+    serverOffset: typeof paging?.offset === 'number' && Number.isSafeInteger(paging.offset) ? paging.offset : null,
+  });
+}
+
+/**
+ * The investigated internal endpoint emits a two-week navigation link even
+ * for an underfilled result. It omits since and sets until to since + 28d;
+ * restoring the original since turns that navigation into a repeating page.
+ * Only recognize this exact envelope inside an explicit <=14d window.
+ * Unknown shapes, full pages and actual collection cursors still use the
+ * ordinary guarded paginator and may return partial results.
+ */
+function isCalendarWindowNavigation(target: ClassicEndpointTarget, page: ReturnType<typeof parseRawCollection>, values: unknown[], link: string | null): boolean {
+  if (!isInvestigatedCalendarEndpoint(target) || !link) return false;
+  if ([...target.url.searchParams.keys()].some(key => !['limit', 'since', 'until'].includes(key))) return false;
+  const paging = page.paging;
+  if (!paging || paging.count !== values.length || paging.limit !== 14 || paging.offset !== 0 || values.length >= 14) return false;
+  const since = rangeInstant(target.url.searchParams.get('since') ?? '');
+  const until = rangeInstant(target.url.searchParams.get('until') ?? '');
+  if (since === undefined || until === undefined || since > until || until - since > 14 * 86400000) return false;
+  let next: URL;
+  try { next = new URL(link, target.url); } catch { return false; }
+  if (next.origin !== 'https://bb.cuhk.edu.cn' || next.username || next.password || next.port || next.hash || next.pathname !== CALENDAR_ITEMS_PATH) return false;
+  if ([...next.searchParams.keys()].some(key => !['limit', 'until'].includes(key))) return false;
+  if (next.searchParams.getAll('until').length !== 1 || next.searchParams.getAll('limit').length !== 1) return false;
+  if (next.searchParams.get('limit') !== target.url.searchParams.get('limit')) return false;
+  if (rangeInstant(next.searchParams.get('until') ?? '') !== since + 28 * 86400000) return false;
+  return values.every(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    const row = value as Record<string, unknown>;
+    if (['calendarId', 'itemSourceType', 'itemSourceId'].some(key => typeof row[key] !== 'string' || !(row[key] as string).trim())) return false;
+    const start = typeof row.startDate === 'string' ? rangeInstant(row.startDate) : undefined;
+    const end = typeof row.endDate === 'string' ? rangeInstant(row.endDate) : undefined;
+    return start !== undefined && end !== undefined && start <= end && start <= until && end >= since;
+  });
+}
+
 /**
  * Bounded collection reader. It keeps empty successful collections distinct
  * from malformed envelopes and never follows a cross-origin or cross-family
@@ -516,6 +602,7 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
   const maxPages = options.maxPages ?? 20;
   if (!Number.isInteger(maxPages) || maxPages < 1 || maxPages > 100) throw new ClassicApiError('BAD_INPUT', '分页页数上限无效。', { scope: 'pagination', retryable: false });
   const seenPages = new Map<string, boolean>();
+  const seenCalendarRecords = new Set<string>();
   const items: T[] = [];
   let target = options.initial;
   let pages = 0;
@@ -542,8 +629,13 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
       stage = 'collection-envelope';
       const page = parseRawCollection(response.data, `pagination:${target.resource}`);
       const values = collectionItems(page);
+      if (isInvestigatedCalendarEndpoint(options.initial) && process.env.CUHK_CALENDAR_DIAGNOSTICS === '1') {
+        logCalendarPageMetadata(target, page, values, pages, options.traceId, seenCalendarRecords);
+      }
       seenPages.set(currentPageKey, values.length === 0);
-      const pageNext = pagingLink(page);
+      const navigation = isCalendarWindowNavigation(target, page, values, pagingLink(page));
+      const pageNext = navigation ? null : pagingLink(page);
+      if (navigation) debugLog.event('classic.api.calendar.window-navigation', { traceId: options.traceId, pages, rowCount: values.length, recognizedNavigation: true });
       if (values.length === 0 && pageNext) {
         if (target.resource !== 'calendar') {
           throw new ClassicApiError('API_SCHEMA_CHANGED', 'Blackboard 空分页页仍带有 next link。', { scope: `pagination:${target.resource}`, retryable: false });

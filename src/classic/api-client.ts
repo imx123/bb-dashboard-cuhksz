@@ -1,5 +1,5 @@
 import { debugLog } from '../debug-log.js';
-import { ClassicApiError } from './api-errors.js';
+import { ClassicApiError, publicApiError } from './api-errors.js';
 import type { ClassicApiCallOptions, ClassicApiResponse, ClassicApiTransport, ClassicRequestBudget, ClassicSession as ClassicSessionContract } from './api-contract.js';
 import { ClassicEndpointRegistry, type ClassicEndpointTarget, type CollectionQuery } from './endpoints.js';
 import { createRequestBudget, paginateCollection, type PaginatedResult } from './pagination.js';
@@ -221,7 +221,44 @@ export class ClassicApiClient {
 
   async calendar(options: ClassicApiCallOptions, since: string, until: string, query?: CollectionQuery): Promise<PaginatedResult<RawCalendarItem>> {
     await this.ensure(options);
-    const result = await this.page(this.endpoints.calendar(since, until, query), options, value => RawCalendarItemSchema.parse(record(value, 'api.calendar')));
+    // Validate both dates before the first request, then cover the entire
+    // requested interval with adjacent, inclusive two-week windows. Internal
+    // calendar navigation is not ordinary offset-based collection paging.
+    this.endpoints.calendar(since, until, query);
+    const rangeEnd = Date.parse(until);
+    let cursor = Date.parse(since);
+    if (cursor > rangeEnd) throw new ClassicApiError('BAD_INPUT', '日历起始时间不能晚于结束时间。', { scope: 'api.calendar', retryable: false });
+    const scopedOptions = { ...options, budget: callBudget(options) };
+    const items: RawCalendarItem[] = [];
+    const seen = new Set<string>();
+    const errors: PaginatedResult<RawCalendarItem>['errors'][number][] = [];
+    let pages = 0, complete = false, truncated = false, nextPage: string | null = null;
+    let windows = 0;
+    do {
+      const end = Math.min(cursor + 14 * 86400000, rangeEnd);
+      const target = this.endpoints.calendar(new Date(cursor).toISOString(), new Date(end).toISOString(), query);
+      if (pages >= 20) {
+        truncated = true;
+        nextPage = target.url.href;
+        errors.push(publicApiError(new ClassicApiError('PARTIAL_RESULTS', '日历时间段读取达到本次上限。', { scope: 'pagination:calendar', retryable: false })));
+        break;
+      }
+      const window = await this.page(target, scopedOptions, value => RawCalendarItemSchema.parse(record(value, 'api.calendar')), 20 - pages);
+      windows++;
+      pages += window.pages;
+      for (const item of window.items) {
+        // Identical boundary rows are shared by adjacent inclusive windows.
+        // Keep changed records, including conflicting deadline evidence.
+        const key = JSON.stringify(item);
+        if (!seen.has(key)) { seen.add(key); items.push(item); }
+      }
+      errors.push(...window.errors);
+      if (!window.complete) { truncated = window.truncated || end < rangeEnd; nextPage = window.nextPage; break; }
+      if (end === rangeEnd) { complete = true; break; }
+      cursor = end;
+    } while (true);
+    const result: PaginatedResult<RawCalendarItem> = { items, pages, complete, truncated, nextPage, errors };
+    debugLog.event('classic.api.calendar.windows', { traceId: options.traceId, windows, pages, received: items.length, complete, truncated, errorCount: errors.length });
     let gradebookColumnCount = 0;
     let knownNonGradebookCount = 0;
     let unknownTypeCount = 0;
