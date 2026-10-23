@@ -428,7 +428,7 @@ function pageKey(url: URL, target: ClassicEndpointTarget): string {
   return canonical.href;
 }
 
-function logCalendarRepeat(reason: CalendarRepeatReason, target: ClassicEndpointTarget, next: URL, traceId: TraceId | undefined, emptyPage: boolean, pages: number, retainedItems: number): void {
+function logCalendarRepeat(reason: CalendarRepeatReason, target: ClassicEndpointTarget, next: URL, traceId: TraceId | undefined, emptyPage: boolean, pages: number, retainedItems: number, nextIsCurrentPage: boolean, nextPageWasEmpty: boolean): void {
   debugLog.event('classic.api.calendar.pagination-repeat', {
     traceId,
     resource: 'calendar',
@@ -436,6 +436,8 @@ function logCalendarRepeat(reason: CalendarRepeatReason, target: ClassicEndpoint
     emptyPage,
     pages,
     retainedItems,
+    nextIsCurrentPage,
+    nextPageWasEmpty,
     targetUrl: target.url.href,
     nextUrl: next.href,
   });
@@ -587,11 +589,16 @@ export async function paginateCollection<T = unknown>(options: PaginationOptions
         const reason: CalendarRepeatReason = nextPageKey === currentPageKey
           ? (values.length === 0 ? 'self' : 'seen-nonempty')
           : (values.length === 0 && seenPages.get(nextPageKey) === true ? 'seen-empty' : 'seen-nonempty');
-        logCalendarRepeat(reason, target, url, options.traceId, values.length === 0, pages, items.length);
+        logCalendarRepeat(reason, target, url, options.traceId, values.length === 0, pages, items.length, nextPageKey === currentPageKey, seenPages.get(nextPageKey) === true);
         if (values.length === 0 && (reason === 'self' || reason === 'seen-empty')) {
           logSchemaSummary(target, options.traceId, schemaDiagnostics, items.length);
           return { items, pages, complete: !itemErrors, truncated: false, nextPage: null, errors };
         }
+        // 非空页的循环不能证明日历已读完。保留成功数据并立即结束，
+        // 与响应结构解析失败分开，且不再请求已访问页面或改写学校游标。
+        return finishPartial(new ClassicApiError('PARTIAL_RESULTS', '日历分页重复，已保留读取结果，完整性尚未确认。', {
+          scope: 'pagination:calendar:repeat', retryable: false,
+        }), 'paging-link');
       }
       target = { ...target, url };
     } catch (error) {

@@ -43,6 +43,22 @@ test('内容树完整但评分列失败时，保留上次评分列作业并标�
   assert.deepEqual(mergeSnapshotV2WithCache(removed, previous).assignments, []);
 });
 
+test('日历重复分页在快照中显示准确说明，保留 partial 和截断状态', async () => {
+  const api = apiWithColumns('empty');
+  api.calendar = async () => ({
+    ...page([]), complete: false, truncated: true,
+    errors: [new ClassicApiError('PARTIAL_RESULTS', 'Synthetic calendar loop', { scope: 'pagination:calendar:repeat', retryable: false }).toPublic()],
+  });
+  const snapshot = (await readClassicSnapshot(api, { signal: new AbortController().signal })).snapshot;
+  const error = snapshot.errors.find(item => item.scope === 'pagination:calendar:repeat');
+  assert.equal(snapshot.state, 'partial');
+  assert.equal(error?.code, 'PARTIAL_RESULTS');
+  assert.match(error?.message ?? '', /日历分页重复.*完整性尚未确认/);
+  const calendar = snapshot.coverage.find(item => item.resource === 'calendar');
+  assert.notEqual(calendar?.state, 'complete');
+  assert.equal(calendar?.truncated, true);
+});
+
 test('作业详情为裸 xid 图片提供同课程来源页，拒绝外站图片', async () => {
   const registrations: Parameters<ClassicResourceRegistrar['register']>[0][] = [];
   const assignment: AssignmentV2 = {

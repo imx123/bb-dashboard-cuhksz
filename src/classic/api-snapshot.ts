@@ -25,7 +25,10 @@ export interface ClassicSnapshotReadResult {
   readonly accountUserId: string;
 }
 
-function fixedErrorMessage(code: PublicClassicApiError['code']): string {
+function fixedErrorMessage(code: PublicClassicApiError['code'], scope?: string): string {
+  if (code === 'PARTIAL_RESULTS' && scope === 'pagination:calendar:repeat') {
+    return '日历分页重复，已保留读取结果，完整性尚未确认；其他课程数据可继续查看。';
+  }
   switch (code) {
     case 'AUTH_REQUIRED': return 'Classic 会话尚未验证。';
     case 'SESSION_EXPIRED': return 'Classic 会话已过期。';
@@ -43,11 +46,11 @@ function fixedErrorMessage(code: PublicClassicApiError['code']): string {
 
 function snapshotError(error: unknown, fallbackScope: string): SnapshotV2['errors'][number] {
   const publicError = publicApiError(error);
-  return { scope: publicError.scope === 'unknown' ? fallbackScope : publicError.scope, code: publicError.code, message: fixedErrorMessage(publicError.code) };
+  return { scope: publicError.scope === 'unknown' ? fallbackScope : publicError.scope, code: publicError.code, message: fixedErrorMessage(publicError.code, publicError.scope) };
 }
 
 function addPublicErrors(output: SnapshotV2['errors'], errors: readonly PublicClassicApiError[], fallbackScope: string): void {
-  for (const error of errors) output.push({ scope: error.scope || fallbackScope, code: error.code, message: fixedErrorMessage(error.code) });
+  for (const error of errors) output.push({ scope: error.scope || fallbackScope, code: error.code, message: fixedErrorMessage(error.code, error.scope) });
 }
 
 function coverageState(received: number, complete: boolean, errors: readonly PublicClassicApiError[]): CoverageState {

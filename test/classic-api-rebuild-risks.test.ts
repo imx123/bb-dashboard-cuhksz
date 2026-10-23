@@ -58,6 +58,67 @@ test('分页 next link 改写 userId 在下一次请求前被拒绝', async () =
   assert.equal(result.errors[0]?.code, 'URL_REJECTED');
 });
 
+test('日历非空页重复 next 立即结束为部分结果，保留两页数据且不误报结构改变', async () => {
+  const initial = new ClassicEndpointRegistry().calendar('2026-10-01T00:00:00Z', '2026-10-31T00:00:00Z');
+  let calls = 0;
+  const transport: ClassicApiTransport = {
+    request: async request => {
+      calls++;
+      const next = new URL(initial.url);
+      next.searchParams.set('offset', '2');
+      return response(request.url, { results: [{ id: calls }], paging: { nextPage: next.href } });
+    },
+  };
+  const result = await paginateCollection({ transport, initial, budget: budget() });
+  assert.equal(calls, 2);
+  assert.deepEqual(result.items, [{ id: 1 }, { id: 2 }]);
+  assert.equal(result.complete, false);
+  assert.equal(result.truncated, true);
+  assert.ok(result.nextPage);
+  assert.deepEqual(result.errors.map(error => [error.code, error.scope, error.retryable]), [
+    ['PARTIAL_RESULTS', 'pagination:calendar:repeat', false],
+  ]);
+});
+
+test('日历已知空页自指仍正常终止，非空页回到旧页仍为部分结果', async () => {
+  const initial = new ClassicEndpointRegistry().calendar('2026-10-01T00:00:00Z', '2026-10-31T00:00:00Z');
+  for (const empty of [true, false]) {
+    let calls = 0;
+    const transport: ClassicApiTransport = {
+      request: async request => {
+        calls++;
+        const next = new URL(initial.url);
+        if (calls === 1 || empty) next.searchParams.set('offset', '2');
+        return response(request.url, { results: calls === 2 && empty ? [] : [{ id: calls }], paging: { nextPage: next.href } });
+      },
+    };
+    const result = await paginateCollection({ transport, initial, budget: budget() });
+    assert.equal(calls, 2);
+    assert.equal(result.complete, empty);
+    assert.equal(result.truncated, !empty);
+    assert.equal(result.errors.length, empty ? 0 : 1);
+    if (!empty) assert.equal(result.errors[0]?.scope, 'pagination:calendar:repeat');
+  }
+});
+
+test('日历循环适配不放宽跨来源链接、条目结构和其他端点的循环检查', async () => {
+  const registry = new ClassicEndpointRegistry();
+  const calendar = registry.calendar('2026-10-01T00:00:00Z', '2026-10-31T00:00:00Z');
+  const cases = [
+    { initial: calendar, next: 'https://external.example/calendar', mapItem: (value: unknown) => value, expected: 'URL_REJECTED' },
+    { initial: calendar, next: null, mapItem: (_value: unknown): never => { throw new ClassicApiError('API_SCHEMA_CHANGED', 'Synthetic invalid row', { scope: 'pagination:calendar:item' }); }, expected: 'API_SCHEMA_CHANGED' },
+    { initial: registry.announcements('_123456_1'), next: 'self', mapItem: (value: unknown) => value, expected: 'API_SCHEMA_CHANGED' },
+  ];
+  for (const example of cases) {
+    const transport: ClassicApiTransport = {
+      request: async request => response(request.url, { results: [{ id: 1 }], paging: { nextPage: example.next === 'self' ? request.url.href : example.next } }),
+    };
+    const result = await paginateCollection({ transport, initial: example.initial, mapItem: example.mapItem, budget: budget() });
+    assert.equal(result.complete, false);
+    assert.equal(result.errors[0]?.code, example.expected);
+  }
+});
+
 test('草稿与历史已提交状态同时存在时保留已提交回执证据', () => {
   const summary = deriveSubmissionSummary({
     lastAttempt: { id: '_draft_1', status: 'IN_PROGRESS' },
