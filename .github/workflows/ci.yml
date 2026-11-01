@@ -1,7 +1,7 @@
 name: Verify and build
+# Manual only: pushes and pull requests do not start a run. Trigger it from the Actions tab
+# or with `gh workflow run "Verify and build"` when a verification pass is actually needed.
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 permissions:
   contents: read
