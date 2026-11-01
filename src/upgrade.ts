@@ -92,7 +92,10 @@ async function attemptDownload(start: URL, file: string, maxBytes: number, limit
         if (!range || Number(range[1]) !== existing) { await res.body?.cancel(); await rm(file, { force: true }); throw new RetryableDownload('network', 'Unexpected Content-Range'); }
         expected = range[3] === '*' ? undefined : Number(range[3]);
         if (expected !== undefined && expected > maxBytes) { await res.body?.cancel(); throw new LmsError('UPDATE_DOWNLOAD_FAILED', '更新下载失败或文件过大；当前版本保持不变。'); }
-      } else if (res.status === 416 && existing) {
+      } else if (res.status === 416) {
+        // A 416 rejects the range this attempt asked for, so start over from zero. It also arrives when no Range was
+        // sent at all: a previous attempt can fail before its bytes reach the disk, leaving nothing to resume from.
+        // Treating that as a final error aborted a download that one clean restart would have completed.
         await res.body?.cancel(); await rm(file, { force: true }); throw new RetryableDownload('network', 'Range not satisfiable');
       } else if (res.status === 200) {
         // A fresh download, or the server ignored the Range header: start the file over.
