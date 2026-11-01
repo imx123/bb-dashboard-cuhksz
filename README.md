@@ -74,10 +74,10 @@ npm run pack:app:win
 
 The last command builds the Windows x64 installer and requires Windows. It writes the installer to `release/`. Source runs use `.cuhk-data`; installed apps use their own user data folder. You can select a custom data folder with `CUHK_LMS_HOME`.
 
-The main Dashboard uses the TypeScript connector and Electron browser. Python is not required for it; the retained Python MCP component is separate.
+The main Dashboard uses the TypeScript connector and Electron browser. Python is not required: the earlier Python sidecar used during research was removed once the TypeScript JSON API replaced it.
 
 ## Credits and license
 
-This project builds on [lms-cli](https://github.com/zs-andy/lms-cli), [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) and [bb-mcp](https://github.com/changshenhan/bb-mcp). See [LICENSE](LICENSE), [bb-mcp's license](sidecar/bb-mcp/LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+This project builds on [lms-cli](https://github.com/zs-andy/lms-cli), [CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) and [bb-mcp](https://github.com/changshenhan/bb-mcp). See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md), which also retain bb-mcp's MIT notice now that its adapted sidecar is no longer shipped.
 
 This is an independent student project, not an official CUHK(SZ) or Blackboard product.

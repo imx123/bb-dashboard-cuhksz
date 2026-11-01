@@ -6,11 +6,12 @@ OpenAI or any other institution.
 ## Imported source repositories
 
 - [tayang-cc/CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard), imported at commit `8530cf56ed5628ac7aa1d0545910dbd68f1343eb`. Its MIT text is retained in the root `LICENSE`.
-- [changshenhan/bb-mcp](https://github.com/changshenhan/bb-mcp), imported at commit `1a2ea2625ea87f42e4597347813c44291e6c2553`. Its license text is retained in `sidecar/bb-mcp/LICENSE`.
+- [changshenhan/bb-mcp](https://github.com/changshenhan/bb-mcp), commit `1a2ea2625ea87f42e4597347813c44291e6c2553`, read as a reference implementation for the CUHK(SZ) Classic navigation. The adapted Python sidecar was retired and removed from this repository on 2026-11-01; no bb-mcp source is distributed with this project. Its MIT notice is reproduced under [Reference-only code](#reference-only-code-removed).
 
 The imported source files remain attributable to their upstream projects. The CUHK(SZ)
 Classic adapter and synthetic fixtures are local additions and do not imply institution
-endorsement. Do not remove either license when copying the Dashboard or sidecar.
+endorsement. Keep the root `LICENSE` when copying the Dashboard, and keep the bb-mcp notice
+below while this project still describes work derived from that reference.
 
 ## Names and brand assets
 
@@ -33,16 +34,36 @@ The official Model Context Protocol TypeScript SDK supplies client/server transp
 
 Exact versions and transitive packages are recorded in `package-lock.json`. Their respective licenses are included by their packages. Electron binaries include Chromium and its notices. Preserve these files when redistributing installers or npm packages.
 
-## Python sidecar dependencies
+## Reference-only code (removed)
 
-The project-local sidecar environment is pinned in `sidecar/bb-mcp/requirements.lock`.
-The direct runtime dependencies tested for this project are:
+`sidecar/bb-mcp/` — the adapted Python Classic sidecar (15 tracked source files, a local
+`requirements.lock` and virtual environment) — was removed on 2026-11-01, after the
+TypeScript JSON API replaced it in the production read path. The direct versions tested
+while it existed were `mcp==1.30.0` and `playwright==1.63.0`, with `pydantic`, `httpx`,
+`cryptography` and `pywin32` among the transitive packages. None of them is a dependency of
+the shipped application, and Playwright browser binaries are no longer part of the delivery.
+The upstream MIT notice is reproduced in full:
 
-- `mcp==1.30.0` (Python Model Context Protocol SDK; package metadata identifies MIT).
-- `playwright==1.63.0` (Python browser automation package; package metadata and upstream
-  notices apply).
+```
+MIT License
 
-The lock file records the transitive packages, including `pydantic`, `httpx`, `cryptography`,
-`pywin32`, and their dependencies. Keep each package's license metadata when redistributing
-the environment. Playwright browser binaries are downloaded separately by the documented
-setup command and are not included in the source delivery.
+Copyright (c) 2026 changshenhan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

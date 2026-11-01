@@ -74,10 +74,10 @@ npm run pack:app:win
 
 最后一条命令需要在 Windows 上运行，会把 x64 安装包输出到 `release/`。源码运行使用 `.cuhk-data`，安装版使用自己的用户数据目录；需要指定其他位置时，可设置 `CUHK_LMS_HOME`。
 
-当前 Dashboard 使用 TypeScript 数据连接器和 Electron 浏览器，不需要 Python。仓库保留的 Python MCP 组件是独立功能。
+当前 Dashboard 使用 TypeScript 数据连接器和 Electron 浏览器，不需要 Python；早期研究阶段用的 Python sidecar 已在 TypeScript JSON API 接管读取链后删除。
 
 ## 来源与许可证
 
-项目基于 [lms-cli](https://github.com/zs-andy/lms-cli)、[CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) 和 [bb-mcp](https://github.com/changshenhan/bb-mcp) 开发。许可证与第三方说明见 [LICENSE](LICENSE)、[bb-mcp 许可证](sidecar/bb-mcp/LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目基于 [lms-cli](https://github.com/zs-andy/lms-cli)、[CUHK-Blackboard-Dashboard](https://github.com/tayang-cc/CUHK-Blackboard-Dashboard) 和 [bb-mcp](https://github.com/changshenhan/bb-mcp) 开发。许可证与第三方说明见 [LICENSE](LICENSE) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；改编的 sidecar 不再随仓库分发，其 MIT 声明已保留在该文件中。
 
 这是独立学生项目，不是 CUHK(SZ) 或 Blackboard 官方产品。
